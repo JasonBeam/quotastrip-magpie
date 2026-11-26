@@ -189,10 +189,12 @@ enum MagpieDecode {
         }
     }
 
-    /// GET /v1/magpie/usage 的当日合计（series 里 label 匹配今天）。
-    /// 返回 (input+output+cacheRead) 总量；DSH 关闭时 Touch Bar「今日」列用它兜底。
+    /// 当日合计（series 里 label 匹配今天），input+output+cacheRead。
+    /// 用 /v1/magpie/usage/requests 的 series：它是网关实时行 + DSH 导入日志的合并口径，
+    /// 与 Magpie App「今日」大数字一致；/v1/magpie/usage 的 series 只含网关行（会少 DSH 部分）。
+    /// 两边同一 response_id 已由 Magpie 去重，这里不再叠加任何本地读数，避免重复计数。
     static func decodeUsageTodayTotal(_ data: Data, now: Date = Date()) -> Int64? {
-        guard data.count <= 1024 * 1024,
+        guard data.count <= 4 * 1024 * 1024,
               let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let series = root["series"] as? [[String: Any]] else { return nil }
         let formatter = DateFormatter()
@@ -430,10 +432,8 @@ final class MagpieProvider {
             return .failed(L("Magpie requests failed.", "Magpie 请求记录读取失败。"))
         }
         var result = activity(from: rows)
-        if let usageURL = URL(string: "v1/magpie/usage", relativeTo: origin),
-           let usageData = get(session, usageURL) {
-            result.todayTotal = MagpieDecode.decodeUsageTodayTotal(usageData)
-        }
+        // 今日合计直接取同一响应的合并 series（含 DSH 日志导入），不再发第二个请求。
+        result.todayTotal = MagpieDecode.decodeUsageTodayTotal(data)
         return .ok(result)
     }
 

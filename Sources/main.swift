@@ -532,6 +532,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate, NS
     }
     private var bar: NSTouchBar!
     private var quotaTimer: Timer?
+    /// App Nap 会把后台 LSUIElement 的定时器拉长到分钟级（实测 20s 变 ~10min），
+    /// 用量/余额就会看起来「冻住」。持有一个 user-initiated activity 保住刷新节奏。
+    private var napActivity: NSObjectProtocol?
     private var isPresented = false
     private let codexBundleIdentifier = "com.openai.codex"
 
@@ -601,9 +604,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate, NS
         DeepSeekHolidayStore.shared.loadLocal()
         DeepSeekHolidayStore.shared.onChange = { [weak self] in self?.deepSeekView.refreshPricingStatus() }
         DeepSeekHolidayStore.shared.refreshIfNeeded()
+        napActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiatedAllowingIdleSystemSleep],
+            reason: "QuotaStrip keeps quota/balance refresh on its 20s cadence")
         refresh()
-        quotaTimer = Timer.scheduledTimer(timeInterval: 20, target: self,
-                                          selector: #selector(refresh), userInfo: nil, repeats: true)
+        quotaTimer = Timer(timeInterval: 20, target: self,
+                           selector: #selector(refresh), userInfo: nil, repeats: true)
+        RunLoop.main.add(quotaTimer!, forMode: .common)
 
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(handleWake),
@@ -704,8 +711,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate, NS
         refreshCodexUsage(force: false)
         refreshSession(force: true)
         panelTickTimer?.invalidate()
-        panelTickTimer = Timer.scheduledTimer(timeInterval: 30, target: self,
-                                              selector: #selector(panelTick), userInfo: nil, repeats: true)
+        panelTickTimer = Timer(timeInterval: 30, target: self,
+                               selector: #selector(panelTick), userInfo: nil, repeats: true)
+        RunLoop.main.add(panelTickTimer!, forMode: .common)
     }
 
     @objc private func panelTick() {
@@ -800,6 +808,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate, NS
             guard let self else { return }
             self.magpieActivity = activity
             self.updateMagpieLiveView()
+            // 今日大数字已改用 Magpie 合并口径，面板也要跟着刷新。
+            self.syncPanel()
         }
     }
 
@@ -836,9 +846,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate, NS
             value.remainingPercent = magpie
             value.stale = magpieSnapshot.stale
         }
-        // 今日 token 优先 DSH 用量口径（已与 Magpie requests 逐模型核对一致）；
-        // DSH 关闭/不可用时退回 Magpie 自己的当日合计，不让列空着。
-        value.todayTokens = deepSeekSnapshot.todayAllTokens ?? magpieActivity.todayTotal
+        // 今日 token 主源 = Magpie 合并口径（网关实时 + DSH 日志导入，与 Magpie App 一致，
+        // Magpie 侧已按 response_id 去重）；Magpie 不可用才回退 DSH 本地读数，两边绝不叠加。
+        value.todayTokens = magpieActivity.todayTotal ?? deepSeekSnapshot.todayAllTokens
         value.model = magpieActivity.model
         value.sessionTokens = magpieActivity.sessionTokens
         value.sessionCacheHit = magpieActivity.sessionCacheHit
@@ -1407,13 +1417,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate, NS
         snapshot.codexModelRows = Self.modelRows(deepSeekSnapshot.todayByModel, prefixes: ["openai/"])
         snapshot.deepSeekModelRows = Self.modelRows(deepSeekSnapshot.todayByModel,
                                                     prefixes: ["deepseek-account/", "deepseek-official/"])
-        // 千帆走 baidu-pzt 前缀；qwen/ 已迁出到千问卡的「今日本地」行（DSH 本地口径）。
+        // 千帆走 baidu-pzt 前缀；qwen/ 的本地读数改由 Magpie 展示，面板不再画「今日本地」行。
         snapshot.qianfanModelRows = Self.modelRows(deepSeekSnapshot.todayByModel,
                                                     prefixes: ["baidu-pzt/"])
         snapshot.qianfanTodayTokens = deepSeekSnapshot.todayProviderTokens["baidu-pzt"]
-        snapshot.qwenLocalModelRows = Self.modelRows(deepSeekSnapshot.todayByModel, prefixes: ["qwen/"])
-        snapshot.qwenLocalTodayTokens = deepSeekSnapshot.todayProviderTokens["qwen"]
-        snapshot.todayAllTokens = deepSeekSnapshot.todayAllTokens
+        // 面板「AI 用量」大数字与 Touch Bar 同源：Magpie 合并口径优先，DSH 只作兜底，不叠加。
+        snapshot.todayAllTokens = magpieActivity.todayTotal ?? deepSeekSnapshot.todayAllTokens
         // 会话标题不在用量接口里（title 恒为 null），从 DSH 的会话缓存只读取一次并缓存 60s。
         if !deepSeekSnapshot.usageSessions.isEmpty {
             snapshot.todaySessionCount = deepSeekSnapshot.usageSessions.filter { session in

@@ -237,6 +237,15 @@ struct MagpieTests {
     static func activityTests() {
         let rows = try! MagpieDecode.decodeRequests(Data(requestsSample.utf8))
         expect(rows.count == 4, "four request rows decoded")
+        // 今日合计取 requests 响应的合并 series（网关+DSH日志，Magpie 已去重）。
+        let merged = """
+        {"rows":[],"series":[{"label":"Nov 26","input":14208124,"output":1177434,"cache_read":262782464}]}
+        """
+        let day = MagpieDecode.parseDate("2026-11-26T21:00:00+08:00")!
+        expect(MagpieDecode.decodeUsageTodayTotal(Data(merged.utf8), now: day) == 14208124 + 1177434 + 262782464,
+               "today total = merged series in+out+cache")
+        expect(MagpieDecode.decodeUsageTodayTotal(Data(#"{"rows":[],"series":[]}"#.utf8), now: day) == nil,
+               "no matching day → nil (fallback to DSH)")
         let live = rows[0]
         expect(live.hasTiming && live.status == 200, "live row timed")
         expect(abs((live.tokensPerSecond ?? 0) - 2309.0 / ((34199 - 33000) / 1000.0)) < 0.001, "tok/s = out / decode seconds (DSH 口径)")
