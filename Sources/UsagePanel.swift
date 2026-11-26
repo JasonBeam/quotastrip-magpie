@@ -91,6 +91,8 @@ struct UsageSnapshot: Equatable {
     var qwenPlanStale = false
     /// Magpie 千问供应商今日消耗（provider=qwen）；nil 时该卡隐藏。
     var magpieQwenToday: MagpieDecode.QwenUsage?
+    /// Magpie Kimi Code 供应商今日消耗（by.provider.kimi）；nil 时该卡隐藏。
+    var magpieKimiToday: MagpieDecode.QwenUsage?
     /// 整段按日明细（Magpie App 热力图同窗口，旧→新）；nil/全 0 时热力图卡隐藏。
     var magpieHeatDays: [MagpieDecode.HeatDay] = []
     /// App 同款 USD→CNY 汇率；nil 时 tooltip 显示 US$。
@@ -413,6 +415,9 @@ struct UsagePanelView: View {
             // Magpie 千问供应商消耗（今日，provider=qwen）：跟在 Token Plan 卡下面。
             if model.snapshot.magpieQwenToday != nil {
                 magpieQwenCard
+            }
+            if model.snapshot.magpieKimiToday != nil {
+                magpieKimiCard
             }
             // Magpie 用量热力图（整段历史、一天一格，与 App 同窗口）：无数据时整卡不出现。
             if model.snapshot.magpieHeatDays.contains(where: { $0.tokens > 0 }) {
@@ -885,12 +890,22 @@ struct UsagePanelView: View {
     // MARK: Magpie 千问供应商卡（今日消耗 + 按模型；跟在 Token Plan 卡下方）
 
     private var magpieQwenCard: some View {
+        magpieProviderCard(title: L("Qwen via Magpie", "千问 · Magpie"),
+                           usage: model.snapshot.magpieQwenToday)
+    }
+
+    private var magpieKimiCard: some View {
+        magpieProviderCard(title: L("Kimi Code via Magpie", "Kimi Code · Magpie"),
+                           usage: model.snapshot.magpieKimiToday)
+    }
+
+    private func magpieProviderCard(title: String, usage: MagpieDecode.QwenUsage?) -> some View {
         // 按模型行复用 Codex 卡的 models 组件：份额条 + 名称 + token 短数字。
-        let rows = (model.snapshot.magpieQwenToday?.models ?? [])
+        let rows = (usage?.models ?? [])
             .map { UsageModelRow(name: $0.name, tokens: $0.tokens) }
         return card {
             VStack(alignment: .leading, spacing: 0) {
-                head(title: L("Qwen via Magpie", "千问 · Magpie"),
+                head(title: title,
                      aside: L("Today", "今日"),
                      icon: "magpie-logo")
                 if !rows.isEmpty {
@@ -906,6 +921,10 @@ struct UsagePanelView: View {
     // MARK: Magpie 用量热力图（App 同款：整段历史、月份表头、周一…周日七行）
 
     private func heatmapCard(_ days: [MagpieDecode.HeatDay]) -> some View {
+        HeatmapCard(days: days, skin: skin, content: heatmapCardContent)
+    }
+
+    private func heatmapCardContent(_ days: [MagpieDecode.HeatDay], skin: PanelSkin) -> some View {
         let peak = max(days.map { $0.tokens }.max() ?? 1, 1)
         let total = days.reduce(Int64(0)) { $0 + $1.tokens }
         let active = days.filter { $0.tokens > 0 }.count
@@ -954,7 +973,7 @@ struct UsagePanelView: View {
                                         RoundedRectangle(cornerRadius: 2.5, style: .continuous)
                                             .fill(heatColor(value: item.tokens, peak: peak))
                                             .frame(width: cell, height: cell)
-                                            .help(heatTooltip(item))
+                                            .background(HeatCellHover(day: item))
                                     } else {
                                         Color.clear.frame(width: cell, height: cell)
                                     }
@@ -968,6 +987,101 @@ struct UsagePanelView: View {
                 pairs([(L("Total", "合计"), GlanceFormat.short(total)),
                        (L("Peak day", "峰值日"), peakDayText(days))])
             }
+        }
+    }
+
+    struct HeatHover {
+        var get: () -> MagpieDecode.HeatDay?
+        var set: (MagpieDecode.HeatDay?) -> Void
+    }
+
+    struct HeatHoverKey: EnvironmentKey {
+        static let defaultValue = HeatHover(get: { nil }, set: { _ in })
+    }
+
+    private struct HeatCellHover: NSViewRepresentable {
+        let day: MagpieDecode.HeatDay
+        @Environment(\.heatHover) private var hover
+
+        func makeNSView(context: Context) -> HeatTrackingView {
+            let view = HeatTrackingView()
+            view.onHover = { entered in hover.set(entered ? day : nil) }
+            return view
+        }
+
+        func updateNSView(_ view: HeatTrackingView, context: Context) {
+            view.onHover = { entered in hover.set(entered ? day : nil) }
+        }
+    }
+
+    private final class HeatTrackingView: NSView {
+        var onHover: ((Bool) -> Void)?
+        private var tracking: NSTrackingArea?
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            // 仅监听悬停，不能吃掉面板的滚动和点击。
+            nil
+        }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let tracking { removeTrackingArea(tracking) }
+            let area = NSTrackingArea(rect: bounds,
+                                      options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                      owner: self, userInfo: nil)
+            addTrackingArea(area)
+            tracking = area
+        }
+
+        override func mouseEntered(with event: NSEvent) { onHover?(true) }
+        override func mouseExited(with event: NSEvent) { onHover?(false) }
+    }
+
+    /// 系统 .help 在这个非激活玻璃面板里收不到 hover，改由 AppKit tracking area
+    /// 直接上报格子坐标；浮层画在面板内部，不额外开窗口。
+    private struct HeatmapCard<Content: View>: View {
+        let days: [MagpieDecode.HeatDay]
+        let skin: PanelSkin
+        @ViewBuilder let content: ([MagpieDecode.HeatDay], PanelSkin) -> Content
+        @State private var hovered: MagpieDecode.HeatDay?
+
+        var body: some View {
+            ZStack(alignment: .top) {
+                content(days, skin)
+                if let day = hovered {
+                    HeatTooltipBubble(day: day)
+                        .padding(.top, PanelStyle.head + 8)
+                        .transition(.opacity)
+                        .allowsHitTesting(false)
+                }
+            }
+            .environment(\.heatHover, HeatHover(get: { hovered }, set: { day in
+                guard day != hovered else { return }
+                withAnimation(.easeInOut(duration: 0.08)) { hovered = day }
+            }))
+        }
+    }
+
+    private struct HeatTooltipBubble: View {
+        let day: MagpieDecode.HeatDay
+
+        var body: some View {
+            let lines = UsagePanelView.heatTooltipLines(day)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(lines.0)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.95))
+                Text(lines.1)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.white.opacity(0.72))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(red: 0.12, green: 0.12, blue: 0.14).opacity(0.97)))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.3), radius: 8, y: 3)
         }
     }
 
@@ -1057,9 +1171,8 @@ struct UsagePanelView: View {
         return skin.ink(.ai).opacity(level)
     }
 
-    /// App 同款悬停明细：「2026年11月27日 周五 · 3678.2 万 token · 223 个请求 · ¥9.27」。
-    /// 汇率读 App 的 fxrate 缓存；读不到显示 US$，不猜汇率。
-    private func heatTooltip(_ day: MagpieDecode.HeatDay) -> String {
+    /// 悬停只保留日期、星期与当天总 token，不重复展示请求数和金额。
+    private static func heatTooltipLines(_ day: MagpieDecode.HeatDay) -> (String, String) {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd"
@@ -1074,24 +1187,13 @@ struct UsagePanelView: View {
             }
         }
         if day.tokens <= 0 && day.calls <= 0 {
-            return dateText + " · " + L("no usage", "无用量")
+            return (dateText, L("no usage", "无用量"))
         }
-        var text = dateText + "\n" + heatTokensText(day.tokens) + " token"
-        if day.calls > 0 {
-            text += " · " + L("\(day.calls) calls", "\(day.calls) 个请求")
-        }
-        if let cost = day.cost {
-            if let fx = model.snapshot.magpieFxRate {
-                text += " · ¥" + String(format: "%.2f", cost * fx)
-            } else {
-                text += " · $" + String(format: "%.2f", cost)
-            }
-        }
-        return text
+        return (dateText, Self.heatTokensText(day.tokens) + " token")
     }
 
     /// App 口径的 token 写法：≥1 万给一位小数「3678.2 万」，≥1 亿「3.8 亿」。
-    private func heatTokensText(_ value: Int64) -> String {
+    private static func heatTokensText(_ value: Int64) -> String {
         let n = Double(value)
         if n >= 100_000_000 { return String(format: "%.1f", n / 100_000_000) + L("B", " 亿") }
         if n >= 10_000 { return String(format: "%.1f", n / 10_000) + L("0K", " 万") }
@@ -1422,6 +1524,13 @@ struct UsagePanelView: View {
 }
 
 // MARK: - 今日面积图（Glance 的 today 块：wash 填充 + 1.6 描边 + 末端 2.6 圆点）
+
+private extension EnvironmentValues {
+    var heatHover: UsagePanelView.HeatHover {
+        get { self[UsagePanelView.HeatHoverKey.self] }
+        set { self[UsagePanelView.HeatHoverKey.self] = newValue }
+    }
+}
 
 struct UsageAreaChart: View {
     var values: [Int64] = []

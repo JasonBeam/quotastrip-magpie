@@ -475,6 +475,39 @@ enum MagpieDecode {
         }.sorted { $0.tokens > $1.tokens }
         return usage
     }
+
+    /// 通用供应商今日消耗：顶层可能被 provider=qwen 过滤，因此合计必须从
+    /// by.provider 中按 id 读取；模型同样只接受对应 provider/ 前缀。
+    static func decodeProviderUsageToday(_ data: Data, provider: String) -> QwenUsage? {
+        guard !provider.isEmpty,
+              data.count <= 4 * 1024 * 1024,
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              (root["period"] as? String) == "today",
+              let by = root["by"] as? [String: Any],
+              let summaries = by["provider"] as? [[String: Any]],
+              let summary = summaries.first(where: { $0["id"] as? String == provider }) else {
+            return nil
+        }
+        func int64(_ raw: Any?) -> Int64 {
+            (raw as? NSNumber).flatMap { $0.int64Value >= 0 ? $0.int64Value : nil } ?? 0
+        }
+        let calls = int64(summary["calls"])
+        let tokens = int64(summary["input"]) + int64(summary["output"]) + int64(summary["cache_read"])
+        guard calls > 0 || tokens > 0 else { return nil }
+        var usage = QwenUsage(calls: Int(calls), tokens: tokens, cost: number(summary["cost"]))
+        let prefix = provider + "/"
+        let modelAt = by["modelAt"] as? [[String: Any]] ?? []
+        usage.models = modelAt.compactMap { item in
+            guard let id = item["id"] as? String, id.hasPrefix(prefix) else { return nil }
+            let name = String(id.dropFirst(prefix.count))
+            guard !name.isEmpty else { return nil }
+            return QwenModelUsage(name: name,
+                                  calls: Int(int64(item["calls"])),
+                                  tokens: int64(item["input"]) + int64(item["output"]) + int64(item["cache_read"]),
+                                  cost: number(item["cost"]))
+        }.sorted { $0.tokens > $1.tokens }
+        return usage
+    }
 }
 
 /// Magpie 只读客户端。端口发现：UserDefaults magpie.origin → GET / manifest 校验。
@@ -632,6 +665,8 @@ final class MagpieProvider {
         var todaySessions: Int?
         /// 千问供应商今日消耗（provider=qwen 过滤）；千问卡下方的 Magpie 卡用。
         var qwenToday: MagpieDecode.QwenUsage?
+        /// Kimi Code 供应商今日消耗；从同一响应的 by.provider.kimi 读取。
+        var kimiToday: MagpieDecode.QwenUsage?
         var error: String?
         var stale = false
     }
@@ -754,6 +789,7 @@ final class MagpieProvider {
         if let qwenURL = URL(string: "v1/magpie/usage/requests?limit=1&period=today&provider=qwen", relativeTo: origin),
            let qwenData = get(session, qwenURL) {
             result.qwenToday = MagpieDecode.decodeQwenUsageToday(qwenData)
+            result.kimiToday = MagpieDecode.decodeProviderUsageToday(qwenData, provider: "kimi")
         }
         return .ok(result)
     }

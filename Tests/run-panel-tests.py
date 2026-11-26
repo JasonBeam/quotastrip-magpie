@@ -196,16 +196,23 @@ def source_checks() -> bool:
           "working row judges activity from the latest Magpie request (120s)")
     check("magpieQwenCard" in panel and "if model.snapshot.magpieQwenToday != nil" in panel,
           "Magpie Qwen provider card exists and hides without data")
+    check("magpieKimiCard" in panel and "if model.snapshot.magpieKimiToday != nil" in panel,
+          "Magpie Kimi Code provider card exists and hides without data")
     check("Token 消耗" not in panel and "估算成本" not in panel and "主力模型" not in panel,
           "Qwen Magpie card keeps only the share bar + model rows (user removed duplicate pairs)")
     check("heatmapCard" in panel and "magpieHeatDays" in panel
           and "magpieHeatDays.contains(where: { $0.tokens > 0 })" in panel,
           "daily heatmap card exists and hides when all days are zero")
     check("snapshot.magpieQwenToday = magpieActivity.qwenToday" in main
+          and "snapshot.magpieKimiToday = magpieActivity.kimiToday" in main
           and "snapshot.magpieHeatDays = magpieActivity.heatDays" in main,
           "syncPanel feeds the new Magpie cards")
-    check("heatTooltip" in panel and "个请求" in panel and "magpieFxRate" in panel,
-          "heat cells carry the App-style tooltip: date+weekday, tokens, calls, CNY cost")
+    check("HeatTrackingView" in panel and "HeatTooltipBubble" in panel
+          and "heatTooltipLines" in panel and "heatTokensText" in panel,
+          "heat cells use the custom hover bubble with date+weekday and daily tokens")
+    tooltip = panel.split("private static func heatTooltipLines", 1)[1].split("private static func heatTokensText", 1)[0]
+    check("个请求" not in tooltip and "day.cost" not in tooltip and "fxRate" not in tooltip,
+          "heat hover omits request count and cost as requested")
 
     return not failures
 

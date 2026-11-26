@@ -1433,6 +1433,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate, NS
         snapshot.weekAllTokens = magpieActivity.weekTotal
         // Magpie 面板扩展：千问供应商今日消耗 / 近 30 天热力图 / 今日会话数 / 最近请求时刻。
         snapshot.magpieQwenToday = magpieActivity.qwenToday
+        snapshot.magpieKimiToday = magpieActivity.kimiToday
         snapshot.magpieHeatDays = magpieActivity.heatDays
         snapshot.magpieFxRate = magpieActivity.fxRate
         snapshot.magpieTodaySessions = magpieActivity.todaySessions

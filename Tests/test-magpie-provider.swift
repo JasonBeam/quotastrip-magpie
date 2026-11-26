@@ -349,6 +349,34 @@ struct MagpieTests {
                "30d response rejected as qwen today")
         expect(MagpieDecode.decodeQwenUsageToday(Data(#"{"period":"today","calls":0,"input":0,"output":0,"cache_read":0}"#.utf8)) == nil,
                "all-zero qwen today → nil (card hidden)")
+
+        // 通用供应商合计取 by.provider，不能误用 qwen 过滤后的顶层；模型也只认 kimi/ 前缀。
+        let mixedProviders = """
+        {"period":"today","calls":455,"input":300,"output":30,"cache_read":3000,"cost":4.3,
+         "by":{"provider":[
+           {"id":"qwen","calls":455,"input":300,"output":30,"cache_read":3000,"cost":4.3},
+           {"id":"kimi","calls":38,"input":753480,"output":17020,"cache_read":8223482,"cost":3.3}],
+          "modelAt":[
+           {"id":"qwen/qwen4-max","calls":455,"input":300,"output":30,"cache_read":3000,"cost":4.3},
+           {"id":"kimi/k3.1-pro","calls":38,"input":753480,"output":17020,"cache_read":8223482,"cost":3.3},
+           {"id":"session-unknown/k3.1-pro","calls":9,"input":90,"output":9,"cache_read":900,"cost":0.9}]}}
+        """
+        let kimi = MagpieDecode.decodeProviderUsageToday(Data(mixedProviders.utf8), provider: "kimi")!
+        expect(kimi.calls == 38 && kimi.tokens == 753480 + 17020 + 8223482,
+               "kimi totals come from by.provider.kimi, not qwen-filtered top level")
+        expect(kimi.models.count == 1 && kimi.models[0].name == "k3.1-pro",
+               "kimi models exclude qwen and session-unknown rows")
+        expect(MagpieDecode.decodeProviderUsageToday(Data(mixedProviders.utf8), provider: "qwen")?.tokens == 3330,
+               "generic decoder also reads qwen provider summary")
+        expect(MagpieDecode.decodeProviderUsageToday(Data(mixedProviders.utf8), provider: "missing") == nil,
+               "missing provider → nil")
+        expect(MagpieDecode.decodeProviderUsageToday(Data(merged.utf8), provider: "kimi") == nil,
+               "30d response rejected as provider today")
+        let zeroKimi = """
+        {"period":"today","by":{"provider":[{"id":"kimi","calls":0,"input":0,"output":0,"cache_read":0}]}}
+        """
+        expect(MagpieDecode.decodeProviderUsageToday(Data(zeroKimi.utf8), provider: "kimi") == nil,
+               "all-zero provider today → nil (card hidden)")
         let live = rows[0]
         expect(live.hasTiming && live.status == 200, "live row timed")
         expect(abs((live.tokensPerSecond ?? 0) - 2309.0 / ((34199 - 33000) / 1000.0)) < 0.001, "tok/s = out / decode seconds (DSH 口径)")
