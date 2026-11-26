@@ -246,6 +246,17 @@ struct MagpieTests {
                "today total = merged series in+out+cache")
         expect(MagpieDecode.decodeUsageTodayTotal(Data(#"{"rows":[],"series":[]}"#.utf8), now: day) == nil,
                "no matching day → nil (fallback to DSH)")
+        // 本周合计：周一(11-23)至周四(11-26)；上周日(11-22)不计。
+        let week = """
+        {"rows":[],"series":[
+          {"label":"Nov 22","time":"2026-11-22T00:00:00+08:00","input":500,"output":0,"cache_read":0},
+          {"label":"Nov 23","time":"2026-11-23T00:00:00+08:00","input":100,"output":10,"cache_read":900},
+          {"label":"Nov 26","time":"2026-11-26T00:00:00+08:00","input":200,"output":20,"cache_read":1800}]}
+        """
+        expect(MagpieDecode.decodeUsageWeekTotal(Data(week.utf8), now: day) == 1010 + 2020,
+               "week total = Mon..today, last Sunday excluded")
+        expect(MagpieDecode.decodeUsageWeekTotal(Data(#"{"rows":[],"series":[]}"#.utf8), now: day) == nil,
+               "empty week → nil")
         let live = rows[0]
         expect(live.hasTiming && live.status == 200, "live row timed")
         expect(abs((live.tokensPerSecond ?? 0) - 2309.0 / ((34199 - 33000) / 1000.0)) < 0.001, "tok/s = out / decode seconds (DSH 口径)")

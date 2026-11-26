@@ -209,6 +209,34 @@ enum MagpieDecode {
         }
         return nil
     }
+
+    /// 本周合计（周一到今天），同样取合并 series；time 带时区的 ISO 日期。
+    /// 无本周一以来的任何记录时返回 nil（不误报 0）。
+    static func decodeUsageWeekTotal(_ data: Data, now: Date = Date()) -> Int64? {
+        guard data.count <= 4 * 1024 * 1024,
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let series = root["series"] as? [[String: Any]] else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        // 周起点固定周一：系统日历 firstWeekday 可能是周日（会把上周日算进本周）。
+        calendar.firstWeekday = 2
+        guard let monday = calendar.dateInterval(of: .weekOfYear, for: now)?.start else { return nil }
+        let dayStart = calendar.startOfDay(for: now)
+        var total: Int64 = 0
+        var matched = false
+        for day in series {
+            guard let text = day["time"] as? String,
+                  let date = parseDate(text) else { continue }
+            let stamp = calendar.startOfDay(for: date)
+            guard stamp >= monday, stamp <= dayStart else { continue }
+            func int64(_ key: String) -> Int64 {
+                (day[key] as? NSNumber).flatMap { $0.int64Value >= 0 ? $0.int64Value : nil } ?? 0
+            }
+            total += int64("input") + int64("output") + int64("cache_read")
+            matched = true
+        }
+        return matched ? total : nil
+    }
 }
 
 /// Magpie 只读客户端。端口发现：UserDefaults magpie.origin → GET / manifest 校验。
@@ -353,6 +381,8 @@ final class MagpieProvider {
         var requestAt: Date?
         /// Magpie 自己的当日 token 合计；DSH 用量不可用时的兜底。
         var todayTotal: Int64?
+        /// 本周（周一至今）合并口径合计；Codex 卡右上角小字用它。
+        var weekTotal: Int64?
         var error: String?
         var stale = false
     }
@@ -434,6 +464,7 @@ final class MagpieProvider {
         var result = activity(from: rows)
         // 今日合计直接取同一响应的合并 series（含 DSH 日志导入），不再发第二个请求。
         result.todayTotal = MagpieDecode.decodeUsageTodayTotal(data)
+        result.weekTotal = MagpieDecode.decodeUsageWeekTotal(data)
         return .ok(result)
     }
 

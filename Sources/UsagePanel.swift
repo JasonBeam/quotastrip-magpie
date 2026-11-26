@@ -76,6 +76,8 @@ struct UsageSnapshot: Equatable {
     var qianfanTodayTokens: Int64?
     /// 今天所有 provider 的 token 合计：面板「AI 用量」大数字用它，跟 dsh-usage-stats 一致。
     var todayAllTokens: Int64?
+    /// 本周（周一至今）全 provider 合并合计（Magpie 口径）：Codex 卡右上角小字。
+    var weekAllTokens: Int64?
     /// 用量接口里的会话清单（累计 token），面板「会话」卡的数据源。
     var usageSessions: [UsageSessionRow] = []
     /// 今天有活动的会话数（用量接口 lastAt 落在今天），「今日共 N 个」用它。
@@ -87,9 +89,6 @@ struct UsageSnapshot: Equatable {
     var qwenPlan: QwenPlan?
     var qwenAccounts: [QwenPlan] = []
     var qwenPlanStale = false
-    /// 千问「今日本地」：DSH 本地口径的 qwen/* 模型行，与朋友 Credits 口径区分。
-    var qwenLocalModelRows: [UsageModelRow] = []
-    var qwenLocalTodayTokens: Int64?
     /// Magpie 管理行：未运行时只显示「Magpie 未运行」，各卡走兜底。
     var magpieRunning = false
     var magpieError: String?
@@ -401,7 +400,8 @@ struct UsagePanelView: View {
             if model.snapshot.qwenPlan != nil {
                 qwenPlanCard
             }
-            sessionsCard
+            // 会话卡与千问「今日本地」行已按用户要求下线（Magpie 已覆盖这两块读数）；
+            // 会话卡实现保留在下方，需要时把 sessionsCard 加回这里即可。
         }
         .padding(.horizontal, PanelStyle.pad)
         .padding(.vertical, PanelStyle.padTop)
@@ -600,11 +600,12 @@ struct UsagePanelView: View {
     // MARK: Codex 卡（Windows / Models / Pairs）
 
     private var codexCard: some View {
-        let todayTokens = model.snapshot.codexRecentDayTokens.last
+        // 右上角小字：本周总用量（Magpie 合并口径，周一至今），不再显示 Codex 单日数。
+        let weekAside = model.snapshot.weekAllTokens.map { L("Week ", "本周 ") + GlanceFormat.short($0) }
         return card {
             VStack(alignment: .leading, spacing: 0) {
                 head(title: "Codex",
-                     aside: todayTokens.map { GlanceFormat.short($0) },
+                     aside: weekAside,
                      icon: "codex-logo")
                 Spacer().frame(height: PanelStyle.blockGap)
                 windows(model.snapshot.codexRows, brand: .codex)
@@ -751,16 +752,6 @@ struct UsagePanelView: View {
                 ForEach(Array(plans.enumerated()), id: \.offset) { _, plan in
                     Spacer().frame(height: PanelStyle.blockGap)
                     qwenAccountBlock(plan, showLabel: plans.count > 1)
-                }
-                // 今日本地（DSH 口径）：与朋友 Credits 口径分开标注，不混算。
-                if !model.snapshot.qwenLocalModelRows.isEmpty {
-                    Spacer().frame(height: PanelStyle.blockGap)
-                    Text(L("Today · local", "今日本地") + "：" + model.snapshot.qwenLocalModelRows.prefix(3)
-                        .map { $0.name + " " + GlanceFormat.short($0.tokens) }
-                        .joined(separator: " · "))
-                        .font(.system(size: PanelStyle.small, weight: .medium))
-                        .foregroundColor(skin.text3)
-                        .lineLimit(2)
                 }
                 if let note = model.snapshot.qwenCrossCheckNote {
                     Spacer().frame(height: 2)

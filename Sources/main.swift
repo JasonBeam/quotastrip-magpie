@@ -1423,6 +1423,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate, NS
         snapshot.qianfanTodayTokens = deepSeekSnapshot.todayProviderTokens["baidu-pzt"]
         // 面板「AI 用量」大数字与 Touch Bar 同源：Magpie 合并口径优先，DSH 只作兜底，不叠加。
         snapshot.todayAllTokens = magpieActivity.todayTotal ?? deepSeekSnapshot.todayAllTokens
+        snapshot.weekAllTokens = magpieActivity.weekTotal
         // 会话标题不在用量接口里（title 恒为 null），从 DSH 的会话缓存只读取一次并缓存 60s。
         if !deepSeekSnapshot.usageSessions.isEmpty {
             snapshot.todaySessionCount = deepSeekSnapshot.usageSessions.filter { session in
