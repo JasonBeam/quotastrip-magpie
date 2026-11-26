@@ -91,7 +91,7 @@ struct UsageSnapshot: Equatable {
     var qwenPlanStale = false
     /// Magpie 千问供应商今日消耗（provider=qwen）；nil 时该卡隐藏。
     var magpieQwenToday: MagpieDecode.QwenUsage?
-    /// 近 30 天按日 token（Magpie 合并口径，旧→新）；nil/全 0 时热力图卡隐藏。
+    /// 整段按日 token（Magpie App 热力图同窗口，旧→新）；nil/全 0 时热力图卡隐藏。
     var magpieHeatDayLabels: [String] = []
     var magpieHeatDayTokens: [Int64] = []
     /// 今日活跃会话数（Magpie 网关口径）；nil 时回退 DSH 读数。
@@ -413,7 +413,7 @@ struct UsagePanelView: View {
             if model.snapshot.magpieQwenToday != nil {
                 magpieQwenCard
             }
-            // Magpie 近 30 天热力图（一天一格，与 Magpie App 同口径）：无数据时整卡不出现。
+            // Magpie 用量热力图（整段历史、一天一格，与 App 同窗口）：无数据时整卡不出现。
             if model.snapshot.magpieHeatDayTokens.contains(where: { $0 > 0 }) {
                 heatmapCard(model.snapshot.magpieHeatDayLabels, model.snapshot.magpieHeatDayTokens)
             }
@@ -911,70 +911,102 @@ struct UsagePanelView: View {
         }
     }
 
-    // MARK: Magpie 近 30 天热力图（GitHub 风格：一天一格、按周分列，与 App 同口径）
+    // MARK: Magpie 用量热力图（App 同款：整段历史、月份表头、周一…周日七行）
 
     private func heatmapCard(_ labels: [String], _ days: [Int64]) -> some View {
         let peak = max(days.max() ?? 1, 1)
         let total = days.reduce(Int64(0), +)
         let active = days.filter { $0 > 0 }.count
-        // 按周分列（周一开头）：30 天 → 5 列 × 7 行；第一列前面缺的天留空槽。
+        // 按周分列（周一开头），一列一周、七行；数据范围外的格留空槽。
         let columns = heatColumns(labels, days)
+        // 格子尺寸按列数自适应：444pt 里去掉左侧星期标签后铺满整行。
+        let labelWidth: CGFloat = 30
+        let gap: CGFloat = 3
+        let available = PanelStyle.fullInner - labelWidth - 8
+        let cell = max(6, min(14, (available - CGFloat(columns.count - 1) * gap) / CGFloat(max(columns.count, 1))))
         return card {
             VStack(alignment: .leading, spacing: 0) {
-                head(title: L("Activity", "近 30 天热力"),
+                head(title: L("Usage heatmap", "用量热力图"),
                      aside: L("\(active) active days", "\(active) 个活跃天"),
-                     icon: "magpie-logo")
-                Spacer().frame(height: PanelStyle.blockGap)
-                HStack(alignment: .top, spacing: 10) {
-                    // 左侧星期标签：一、三、五、日（GitHub 风格隔行标）。
-                    VStack(alignment: .trailing, spacing: 4) {
+                     icon: "magpie-logo",
+                     trailing: AnyView(heatLegend))
+                Spacer().frame(height: 8)
+                // 月份表头：每列周首日跨月时标「N月」，与 App 一致。
+                HStack(spacing: gap) {
+                    ForEach(Array(columns.enumerated()), id: \.offset) { index, column in
+                        Text(heatMonthLabel(columns, index))
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundColor(skin.text3)
+                            .lineLimit(1)
+                            .fixedSize()
+                            .frame(width: cell, alignment: .leading)
+                    }
+                }
+                .padding(.leading, labelWidth + 8)
+                Spacer().frame(height: 4)
+                HStack(alignment: .top, spacing: 8) {
+                    // 左侧星期标签：周一/周三/周五/周日（App 同款隔行标）。
+                    VStack(alignment: .trailing, spacing: gap) {
                         ForEach(0..<7, id: \.self) { row in
                             Text(heatWeekday(row))
                                 .font(.system(size: 9, weight: .medium))
                                 .foregroundColor(skin.text3)
-                                .frame(height: 14)
+                                .frame(width: labelWidth, height: cell, alignment: .trailing)
                         }
                     }
-                    HStack(alignment: .top, spacing: 4) {
+                    HStack(alignment: .top, spacing: gap) {
                         ForEach(Array(columns.enumerated()), id: \.offset) { _, column in
-                            VStack(spacing: 4) {
-                                ForEach(Array(column.enumerated()), id: \.offset) { _, cell in
-                                    if let cell {
-                                        RoundedRectangle(cornerRadius: 3, style: .continuous)
-                                            .fill(heatColor(value: cell.tokens, peak: peak))
-                                            .frame(width: 14, height: 14)
-                                            .help(cell.label + " · " + GlanceFormat.short(cell.tokens))
+                            VStack(spacing: gap) {
+                                ForEach(Array(column.enumerated()), id: \.offset) { _, item in
+                                    if let item {
+                                        RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                                            .fill(heatColor(value: item.tokens, peak: peak))
+                                            .frame(width: cell, height: cell)
+                                            .help(item.label + " · " + GlanceFormat.short(item.tokens))
                                     } else {
-                                        Color.clear.frame(width: 14, height: 14)
+                                        Color.clear.frame(width: cell, height: cell)
                                     }
                                 }
                             }
                         }
                     }
-                    Spacer(minLength: 8)
-                    // 右侧图例：少 → 多。
-                    VStack(alignment: .trailing, spacing: 6) {
-                        Text(L("Less", "少"))
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundColor(skin.text3)
-                        HStack(spacing: 3) {
-                            RoundedRectangle(cornerRadius: 2, style: .continuous)
-                                .fill(skin.track).frame(width: 10, height: 10)
-                            ForEach([0.3, 0.55, 0.8, 1.0], id: \.self) { level in
-                                RoundedRectangle(cornerRadius: 2, style: .continuous)
-                                    .fill(skin.ink(.ai).opacity(level)).frame(width: 10, height: 10)
-                            }
-                        }
-                        Text(L("More", "多"))
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundColor(skin.text3)
-                    }
+                    Spacer(minLength: 0)
                 }
                 Spacer().frame(height: PanelStyle.blockGap)
-                pairs([(L("30-day total", "30 天合计"), GlanceFormat.short(total)),
+                pairs([(L("Total", "合计"), GlanceFormat.short(total)),
                        (L("Peak day", "峰值日"), peakDayText(labels, days))])
             }
         }
+    }
+
+    /// 标题行右侧图例：少 □□□□□ 多（App 同款，横排省高度）。
+    private var heatLegend: some View {
+        HStack(spacing: 4) {
+            Text(L("Less", "少"))
+                .font(.system(size: 9, weight: .medium))
+                .foregroundColor(skin.text3)
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .fill(skin.track).frame(width: 9, height: 9)
+            ForEach([0.3, 0.55, 0.8, 1.0], id: \.self) { level in
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                    .fill(skin.ink(.ai).opacity(level)).frame(width: 9, height: 9)
+            }
+            Text(L("More", "多"))
+                .font(.system(size: 9, weight: .medium))
+                .foregroundColor(skin.text3)
+        }
+        .padding(.leading, 10)
+    }
+
+    /// 该列周首日的月份；只在与上一列不同月时显示（第一列必显）。
+    private func heatMonthLabel(_ columns: [[HeatCell?]], _ index: Int) -> String {
+        guard let first = columns[index].compactMap({ $0 }).first else { return "" }
+        let month = String(first.label.dropFirst(5).prefix(2))
+        if index > 0, let prev = columns[index - 1].compactMap({ $0 }).first,
+           String(prev.label.dropFirst(5).prefix(2)) == month {
+            return ""
+        }
+        return month.hasPrefix("0") ? String(month.dropFirst()) + L("", "月") : month + L("", "月")
     }
 
     private struct HeatCell {
@@ -1012,13 +1044,13 @@ struct UsagePanelView: View {
         return columns
     }
 
-    /// 周一=0…周日=6 的短标签；隔行显示（GitHub 风格），其余留空保持格高。
+    /// 周一=0…周日=6 的标签；隔行显示（App 同款），其余留空保持格高。
     private func heatWeekday(_ row: Int) -> String {
         switch row {
-        case 0: return L("M", "一")
-        case 2: return L("W", "三")
-        case 4: return L("F", "五")
-        case 6: return L("S", "日")
+        case 0: return L("Mon", "周一")
+        case 2: return L("Wed", "周三")
+        case 4: return L("Fri", "周五")
+        case 6: return L("Sun", "周日")
         default: return ""
         }
     }

@@ -310,6 +310,78 @@ enum MagpieDecode {
         return (labels, tokens)
     }
 
+    /// Magpie App「用量热力图」的整段历史（约一年，一天一格）。
+    /// 公开 /v1 接口只回 30 天；App 自己读的是本地缓存 ~/.cache/magpie/heat-v1.json：
+    /// days[] 是 cut 之前已归档的每日合计，cut 当天起用 30d 合并 series 补齐。
+    /// 这是只读 Magpie 自己的非敏感聚合缓存（无对话内容/凭据），不写不删。
+    struct HeatDay: Equatable {
+        var label: String   // "yyyy-MM-dd"
+        var tokens: Int64
+    }
+
+    static func decodeHeatCache(_ data: Data) -> (cut: Date, days: [String: Int64])? {
+        guard data.count <= 4 * 1024 * 1024,
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let cut = parseDate(root["cut"] as? String),
+              let array = root["days"] as? [[String: Any]] else { return nil }
+        var days: [String: Int64] = [:]
+        for item in array {
+            guard let date = item["date"] as? String, date.count == 10,
+                  let tokens = (item["tokens"] as? NSNumber)?.int64Value, tokens >= 0 else { continue }
+            days[date] = tokens
+        }
+        guard !days.isEmpty else { return nil }
+        return (cut, days)
+    }
+
+    /// 合并整段热力：缓存里 cut 之前的天 + 30d series 里 cut 当天起的天。
+    /// 输出从「最早有数据那周的周一」到今天的连续日序列（无数据的天补 0），
+    /// 与 App 一样只在窗口内画格；两边都没有数据返回 nil。
+    static func mergeHeatmap(cached: (cut: Date, days: [String: Int64])?,
+                             series: (labels: [String], tokens: [Int64])?,
+                             now: Date = Date()) -> (labels: [String], tokens: [Int64])? {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        calendar.firstWeekday = 2
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        let today = calendar.startOfDay(for: now)
+        var byDay: [Date: Int64] = [:]
+        var earliest: Date?
+        if let cached {
+            let cutDay = calendar.startOfDay(for: cached.cut)
+            for (label, tokens) in cached.days {
+                guard let date = formatter.date(from: label) else { continue }
+                let day = calendar.startOfDay(for: date)
+                guard day < cutDay else { continue }   // cut 起以实时 series 为准
+                byDay[day] = tokens
+                if earliest == nil || day < earliest! { earliest = day }
+            }
+        }
+        if let series {
+            for (index, label) in series.labels.enumerated() where index < series.tokens.count {
+                guard let date = formatter.date(from: label) else { continue }
+                let day = calendar.startOfDay(for: date)
+                byDay[day] = series.tokens[index]
+                if earliest == nil || day < earliest! { earliest = day }
+            }
+        }
+        guard let first = earliest,
+              let start = calendar.dateInterval(of: .weekOfYear, for: first)?.start,
+              start <= today else { return nil }
+        var labels: [String] = []
+        var tokens: [Int64] = []
+        var day = start
+        while day <= today {
+            labels.append(formatter.string(from: day))
+            tokens.append(byDay[day] ?? 0)
+            guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
+            day = next
+        }
+        return (labels, tokens)
+    }
+
     /// 今日活跃会话数：GET /v1/magpie/usage?period=today 的 sessions 去重计数。
     /// 该端点只含网关看到的行（比合并口径少 DSH 日志导入），作为「今日共 N 个」
     /// 的 Magpie 主源可接受；period 不是 today 的响应拒收，避免把 30d 会话当今日。
@@ -518,7 +590,7 @@ final class MagpieProvider {
         /// 近 7 天合并口径序列（旧→新）；AI 用量卡折线图主源，nil 时回退 DSH。
         var recentDayLabels: [String] = []
         var recentDayTokens: [Int64] = []
-        /// 近 30 天按日 token（旧→新，与 Magpie App 热力图同口径）；面板热力图用。
+        /// 整段按日 token（旧→新，与 Magpie App「用量热力图」同窗口同口径）；面板热力图用。
         var heatDayLabels: [String] = []
         var heatDayTokens: [Int64] = []
         /// 今日活跃会话数（Magpie 网关口径）；「今日共 N 个」主源。
@@ -611,8 +683,17 @@ final class MagpieProvider {
             result.recentDayLabels = recent.labels
             result.recentDayTokens = recent.tokens
         }
-        // 热力图与折线图同源：同一份 30d 合并 series，一天一格（Magpie App 同款）。
-        if let heat = MagpieDecode.decodeUsageHeatmap(data) {
+        // 热力图 = App 同款整段历史：~/.cache/magpie/heat-v1.json（cut 前已归档的
+        // 每日合计，只读）+ 同一份 30d 合并 series 补 cut 起的最近几天。
+        // 缓存读不到时退回纯 30d series，卡片仍可用，只是窗口短。
+        let recent = MagpieDecode.decodeUsageHeatmap(data)
+        var cached: (cut: Date, days: [String: Int64])?
+        let cacheURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cache/magpie/heat-v1.json")
+        if let cacheData = try? Data(contentsOf: cacheURL) {
+            cached = MagpieDecode.decodeHeatCache(cacheData)
+        }
+        if let heat = MagpieDecode.mergeHeatmap(cached: cached, series: recent) {
             result.heatDayLabels = heat.labels
             result.heatDayTokens = heat.tokens
         }

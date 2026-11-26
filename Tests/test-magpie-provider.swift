@@ -288,6 +288,30 @@ struct MagpieTests {
         expect(MagpieDecode.decodeUsageHeatmap(Data(#"{"period":"today","bucket":"hour","series":[{"label":"00"}]}"#.utf8), now: day) == nil,
                "hourly bucket rejected as daily heatmap")
 
+        // 整段热力：App 缓存（cut 前归档）+ 实时 series（cut 起）合并。
+        let cacheSample = """
+        {"key":"x","cut":"2026-11-25T00:00:00+08:00","since":"2025-11-24T00:00:00+08:00","days":[
+          {"date":"2026-11-20","calls":10,"tokens":1000,"cost":1.0},
+          {"date":"2026-11-24","calls":20,"tokens":2000,"cost":2.0},
+          {"date":"2026-11-25","calls":99,"tokens":99999,"cost":9.0}]}
+        """
+        let cached = MagpieDecode.decodeHeatCache(Data(cacheSample.utf8))!
+        expect(cached.days.count == 3, "heat cache days decoded")
+        expect(MagpieDecode.decodeHeatCache(Data(#"{"days":[]}"#.utf8)) == nil, "cache without cut rejected")
+        let liveSeries = (labels: ["2026-11-25", "2026-11-26"], tokens: [Int64(3000), Int64(4000)])
+        let full = MagpieDecode.mergeHeatmap(cached: cached, series: liveSeries, now: day)!
+        // 起点 = 最早数据 11-20（周五）所在周的周一 11-16；终点 11-26。
+        expect(full.labels.first == "2026-11-16" && full.labels.last == "2026-11-26" && full.labels.count == 11,
+               "merged heat spans Monday-of-first-week .. today")
+        func heatAt(_ label: String) -> Int64 { full.tokens[full.labels.firstIndex(of: label)!] }
+        expect(heatAt("2026-11-20") == 1000 && heatAt("2026-11-24") == 2000, "cached days kept")
+        expect(heatAt("2026-11-25") == 3000, "cut day comes from live series, not stale cache")
+        expect(heatAt("2026-11-26") == 4000 && heatAt("2026-11-16") == 0, "live tail kept, gaps zero")
+        let seriesOnly = MagpieDecode.mergeHeatmap(cached: nil, series: liveSeries, now: day)!
+        expect(seriesOnly.labels.first == "2026-11-23" && seriesOnly.labels.count == 4,
+               "no cache → series-only week fallback")
+        expect(MagpieDecode.mergeHeatmap(cached: nil, series: nil, now: day) == nil, "no data → nil")
+
         // 今日会话数：去重 id；period 非 today 拒收。
         let sessionsToday = """
         {"period":"today","sessions":[{"id":"a","agent":"codex"},{"id":"b","agent":"dsh"},{"id":"a","agent":"codex"}]}
