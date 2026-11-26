@@ -257,6 +257,67 @@ struct MagpieTests {
                "week total = Mon..today, last Sunday excluded")
         expect(MagpieDecode.decodeUsageWeekTotal(Data(#"{"rows":[],"series":[]}"#.utf8), now: day) == nil,
                "empty week → nil")
+
+        // 近 7 天折线：11-20…11-26，缺的天补 0；完全无重叠 → nil。
+        let recent = """
+        {"rows":[],"series":[
+          {"label":"Nov 19","time":"2026-11-19T00:00:00+08:00","input":9,"output":0,"cache_read":0},
+          {"label":"Nov 20","time":"2026-11-20T00:00:00+08:00","input":100,"output":10,"cache_read":900},
+          {"label":"Nov 26","time":"2026-11-26T00:00:00+08:00","input":200,"output":20,"cache_read":1800}]}
+        """
+        let trend = MagpieDecode.decodeUsageRecentDays(Data(recent.utf8), now: day)!
+        expect(trend.labels.count == 7 && trend.labels.first == "2026-11-20" && trend.labels.last == "2026-11-26",
+               "recent 7 days: old→new local dates")
+        expect(trend.tokens == [1010, 0, 0, 0, 0, 0, 2020], "missing days are zero slots, Nov 19 excluded")
+        expect(MagpieDecode.decodeUsageRecentDays(Data(#"{"rows":[],"series":[]}"#.utf8), now: day) == nil,
+               "no overlap → nil (DSH fallback)")
+
+        // 近 30 天热力图：与折线同源的按日 series；缺的天补 0，一天一格。
+        let heatSample = """
+        {"bucket":"day","rows":[],"series":[
+          {"label":"Oct 29","time":"2026-10-29T00:00:00+08:00","input":50,"output":5,"cache_read":45},
+          {"label":"Nov 26","time":"2026-11-26T00:00:00+08:00","input":200,"output":20,"cache_read":1800}]}
+        """
+        let heat = MagpieDecode.decodeUsageHeatmap(Data(heatSample.utf8), now: day)!
+        expect(heat.labels.count == 30 && heat.labels.first == "2026-10-28" && heat.labels.last == "2026-11-26",
+               "heatmap: 30 daily slots old→new")
+        expect(heat.tokens[1] == 100 && heat.tokens[29] == 2020 && heat.tokens[0] == 0 && heat.tokens[15] == 0,
+               "heatmap: missing days zero, matched days summed")
+        expect(MagpieDecode.decodeUsageHeatmap(Data(#"{"bucket":"day","rows":[],"series":[]}"#.utf8), now: day) == nil,
+               "empty heatmap → nil (card hidden)")
+        expect(MagpieDecode.decodeUsageHeatmap(Data(#"{"period":"today","bucket":"hour","series":[{"label":"00"}]}"#.utf8), now: day) == nil,
+               "hourly bucket rejected as daily heatmap")
+
+        // 今日会话数：去重 id；period 非 today 拒收。
+        let sessionsToday = """
+        {"period":"today","sessions":[{"id":"a","agent":"codex"},{"id":"b","agent":"dsh"},{"id":"a","agent":"codex"}]}
+        """
+        expect(MagpieDecode.decodeUsageTodaySessions(Data(sessionsToday.utf8)) == 2, "today sessions deduped")
+        expect(MagpieDecode.decodeUsageTodaySessions(Data(#"{"period":"30d","sessions":[{"id":"a"}]}"#.utf8)) == nil,
+               "30d sessions rejected as today")
+        expect(MagpieDecode.decodeUsageTodaySessions(Data(#"{"period":"today","sessions":[]}"#.utf8)) == 0,
+               "empty today sessions → 0 (real zero, not unknown)")
+
+        // 千问供应商今日消耗：只取 qwen/ 前缀的 modelAt；session-unknown 不混入。
+        let qwenToday = """
+        {"period":"today","calls":1861,"input":12157099,"output":929501,"cache_read":275951104,"cost":19.57,
+         "by":{"modelAt":[
+           {"id":"qwen/qwen4-max","calls":800,"input":100,"output":10,"cache_read":900,"cost":16.1},
+           {"id":"session-unknown/qwen4-max","calls":50,"input":5,"output":5,"cache_read":50,"cost":0.1},
+           {"id":"qwen/deepseek-v4.1-flash-1017","calls":900,"input":200,"output":20,"cache_read":1800,"cost":1.7}]}}
+        """
+        let qwen = MagpieDecode.decodeQwenUsageToday(Data(qwenToday.utf8))!
+        expect(qwen.calls == 1861 && qwen.tokens == 12157099 + 929501 + 275951104,
+               "qwen today totals from filtered top level")
+        expect(qwen.cost == 19.57, "qwen cost preserved")
+        expect(qwen.models.count == 2, "session-unknown rows excluded from qwen models")
+        expect(qwen.models[0].name == "deepseek-v4.1-flash-1017" && qwen.models[0].tokens == 2020,
+               "qwen models sorted by tokens desc, prefix stripped")
+        expect(qwen.models[1].name == "qwen4-max" && qwen.models[1].calls == 800, "qwen4-max kept")
+        expect(MagpieDecode.decodeQwenUsageToday(Data(merged.utf8)) == nil,
+               "30d response rejected as qwen today")
+        expect(MagpieDecode.decodeQwenUsageToday(Data(#"{"period":"today","calls":0,"input":0,"output":0,"cache_read":0}"#.utf8)) == nil,
+               "all-zero qwen today → nil (card hidden)")
         let live = rows[0]
         expect(live.hasTiming && live.status == 200, "live row timed")
         expect(abs((live.tokensPerSecond ?? 0) - 2309.0 / ((34199 - 33000) / 1000.0)) < 0.001, "tok/s = out / decode seconds (DSH 口径)")

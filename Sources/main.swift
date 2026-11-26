@@ -1407,8 +1407,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate, NS
         snapshot.deepSeekTotalHeldText = deepSeekSnapshot.accountTotalHeld.map {
             Self.currencySymbol(deepSeekSnapshot.currency) + Self.money($0)
         }
-        snapshot.recentDayLabels = deepSeekSnapshot.recentDayLabels
-        snapshot.recentDayTokens = deepSeekSnapshot.recentDayTokens
+        // 折线图主源 = Magpie 合并 series（与今日大数字同口径）；Magpie 无近 7 天
+        // 数据才回退 DSH 的 deepseek 口径，两边不叠加。
+        if !magpieActivity.recentDayTokens.isEmpty {
+            snapshot.recentDayLabels = magpieActivity.recentDayLabels
+            snapshot.recentDayTokens = magpieActivity.recentDayTokens
+        } else {
+            snapshot.recentDayLabels = deepSeekSnapshot.recentDayLabels
+            snapshot.recentDayTokens = deepSeekSnapshot.recentDayTokens
+        }
         snapshot.deepSeekTodayTokens = deepSeekSnapshot.todayTokens
         snapshot.deepSeekMonthTokens = deepSeekSnapshot.monthTokens
         snapshot.deepSeekCacheHitPercent = deepSeekSnapshot.todayCacheHitPercent
@@ -1424,6 +1431,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate, NS
         // 面板「AI 用量」大数字与 Touch Bar 同源：Magpie 合并口径优先，DSH 只作兜底，不叠加。
         snapshot.todayAllTokens = magpieActivity.todayTotal ?? deepSeekSnapshot.todayAllTokens
         snapshot.weekAllTokens = magpieActivity.weekTotal
+        // Magpie 面板扩展：千问供应商今日消耗 / 近 30 天热力图 / 今日会话数 / 最近请求时刻。
+        snapshot.magpieQwenToday = magpieActivity.qwenToday
+        snapshot.magpieHeatDayLabels = magpieActivity.heatDayLabels
+        snapshot.magpieHeatDayTokens = magpieActivity.heatDayTokens
+        snapshot.magpieTodaySessions = magpieActivity.todaySessions
+        snapshot.magpieRequestAt = magpieActivity.requestAt
         // 会话标题不在用量接口里（title 恒为 null），从 DSH 的会话缓存只读取一次并缓存 60s。
         if !deepSeekSnapshot.usageSessions.isEmpty {
             snapshot.todaySessionCount = deepSeekSnapshot.usageSessions.filter { session in

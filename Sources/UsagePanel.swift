@@ -89,6 +89,15 @@ struct UsageSnapshot: Equatable {
     var qwenPlan: QwenPlan?
     var qwenAccounts: [QwenPlan] = []
     var qwenPlanStale = false
+    /// Magpie 千问供应商今日消耗（provider=qwen）；nil 时该卡隐藏。
+    var magpieQwenToday: MagpieDecode.QwenUsage?
+    /// 近 30 天按日 token（Magpie 合并口径，旧→新）；nil/全 0 时热力图卡隐藏。
+    var magpieHeatDayLabels: [String] = []
+    var magpieHeatDayTokens: [Int64] = []
+    /// 今日活跃会话数（Magpie 网关口径）；nil 时回退 DSH 读数。
+    var magpieTodaySessions: Int?
+    /// 最近一条真实对话请求的时刻（Magpie rows）；「N 个会话进行中」判活跃用。
+    var magpieRequestAt: Date?
     /// Magpie 管理行：未运行时只显示「Magpie 未运行」，各卡走兜底。
     var magpieRunning = false
     var magpieError: String?
@@ -400,6 +409,14 @@ struct UsagePanelView: View {
             if model.snapshot.qwenPlan != nil {
                 qwenPlanCard
             }
+            // Magpie 千问供应商消耗（今日，provider=qwen）：跟在 Token Plan 卡下面。
+            if model.snapshot.magpieQwenToday != nil {
+                magpieQwenCard
+            }
+            // Magpie 近 30 天热力图（一天一格，与 Magpie App 同口径）：无数据时整卡不出现。
+            if model.snapshot.magpieHeatDayTokens.contains(where: { $0 > 0 }) {
+                heatmapCard(model.snapshot.magpieHeatDayLabels, model.snapshot.magpieHeatDayTokens)
+            }
             // 会话卡与千问「今日本地」行已按用户要求下线（Magpie 已覆盖这两块读数）；
             // 会话卡实现保留在下方，需要时把 sessionsCard 加回这里即可。
         }
@@ -584,6 +601,15 @@ struct UsagePanelView: View {
     }
 
     private var workingText: String {
+        // Magpie 主源：最近 120s 内有真实对话请求就算「1 个会话进行中」
+        //（rows 只反映最新一条，多会话并发无法从 limit=100 精确判定，不猜 N）。
+        if let at = model.snapshot.magpieRequestAt, Date().timeIntervalSince(at) <= 120 {
+            return L("1 session at work", "1 个会话进行中")
+        }
+        if model.snapshot.magpieRunning {
+            return L("No session at work", "没有进行中的会话")
+        }
+        // Magpie 不可用才回退 DSH 跟随状态。
         if case .live = model.snapshot.sessionStatus {
             return L("1 session at work", "1 个会话进行中")
         }
@@ -593,7 +619,10 @@ struct UsagePanelView: View {
     }
 
     private var todayTotalText: String {
-        let count = model.snapshot.todaySessionCount ?? model.snapshot.sessionChoices.count
+        // 「今日共 N 个」主源 = Magpie 今日活跃会话；nil 才回退 DSH。
+        let count = model.snapshot.magpieTodaySessions
+            ?? model.snapshot.todaySessionCount
+            ?? model.snapshot.sessionChoices.count
         return count > 0 ? L("\(count) today", "今日共 \(count) 个") : ""
     }
 
@@ -850,6 +879,163 @@ struct UsagePanelView: View {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "MM-dd"
         return formatter.string(from: reset) + " " + L("reset", "重置")
+    }
+
+    // MARK: Magpie 千问供应商卡（今日消耗 + 按模型；跟在 Token Plan 卡下方）
+
+    private var magpieQwenCard: some View {
+        let usage = model.snapshot.magpieQwenToday
+        // 按模型行复用 Codex 卡的 models 组件：份额条 + 名称 + token 短数字。
+        let rows = (usage?.models ?? []).map { UsageModelRow(name: $0.name, tokens: $0.tokens) }
+        return card {
+            VStack(alignment: .leading, spacing: 0) {
+                head(title: L("Qwen via Magpie", "千问 · Magpie"),
+                     aside: L("Today", "今日"),
+                     icon: "magpie-logo")
+                if !rows.isEmpty {
+                    Spacer().frame(height: PanelStyle.blockGap)
+                    models(rows, brand: .ai)
+                }
+                Spacer().frame(height: PanelStyle.blockGap)
+                pairs([(L("Tokens", "Token 消耗"),
+                        usage.map { GlanceFormat.short($0.tokens) } ?? "—"),
+                       (L("Calls", "请求"),
+                        usage.map { GlanceFormat.grouped(Int64($0.calls)) } ?? "—")])
+                if let cost = usage?.cost {
+                    Spacer().frame(height: PanelStyle.blockGap)
+                    pairs([(L("Est. cost", "估算成本"), String(format: "$%.2f", cost)),
+                           (L("Top model", "主力模型"),
+                            usage?.models.first.map { shortModelName($0.name) } ?? "—")])
+                }
+            }
+        }
+    }
+
+    // MARK: Magpie 近 30 天热力图（GitHub 风格：一天一格、按周分列，与 App 同口径）
+
+    private func heatmapCard(_ labels: [String], _ days: [Int64]) -> some View {
+        let peak = max(days.max() ?? 1, 1)
+        let total = days.reduce(Int64(0), +)
+        let active = days.filter { $0 > 0 }.count
+        // 按周分列（周一开头）：30 天 → 5 列 × 7 行；第一列前面缺的天留空槽。
+        let columns = heatColumns(labels, days)
+        return card {
+            VStack(alignment: .leading, spacing: 0) {
+                head(title: L("Activity", "近 30 天热力"),
+                     aside: L("\(active) active days", "\(active) 个活跃天"),
+                     icon: "magpie-logo")
+                Spacer().frame(height: PanelStyle.blockGap)
+                HStack(alignment: .top, spacing: 10) {
+                    // 左侧星期标签：一、三、五、日（GitHub 风格隔行标）。
+                    VStack(alignment: .trailing, spacing: 4) {
+                        ForEach(0..<7, id: \.self) { row in
+                            Text(heatWeekday(row))
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundColor(skin.text3)
+                                .frame(height: 14)
+                        }
+                    }
+                    HStack(alignment: .top, spacing: 4) {
+                        ForEach(Array(columns.enumerated()), id: \.offset) { _, column in
+                            VStack(spacing: 4) {
+                                ForEach(Array(column.enumerated()), id: \.offset) { _, cell in
+                                    if let cell {
+                                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                            .fill(heatColor(value: cell.tokens, peak: peak))
+                                            .frame(width: 14, height: 14)
+                                            .help(cell.label + " · " + GlanceFormat.short(cell.tokens))
+                                    } else {
+                                        Color.clear.frame(width: 14, height: 14)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Spacer(minLength: 8)
+                    // 右侧图例：少 → 多。
+                    VStack(alignment: .trailing, spacing: 6) {
+                        Text(L("Less", "少"))
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundColor(skin.text3)
+                        HStack(spacing: 3) {
+                            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                                .fill(skin.track).frame(width: 10, height: 10)
+                            ForEach([0.3, 0.55, 0.8, 1.0], id: \.self) { level in
+                                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                                    .fill(skin.ink(.ai).opacity(level)).frame(width: 10, height: 10)
+                            }
+                        }
+                        Text(L("More", "多"))
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundColor(skin.text3)
+                    }
+                }
+                Spacer().frame(height: PanelStyle.blockGap)
+                pairs([(L("30-day total", "30 天合计"), GlanceFormat.short(total)),
+                       (L("Peak day", "峰值日"), peakDayText(labels, days))])
+            }
+        }
+    }
+
+    private struct HeatCell {
+        var label: String
+        var tokens: Int64
+    }
+
+    /// 把 (日期, token) 序列铺进「周一开头」的周列；不在序列里的格是 nil（空槽）。
+    private func heatColumns(_ labels: [String], _ days: [Int64]) -> [[HeatCell?]] {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        calendar.firstWeekday = 2
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        var cells: [(row: Int, week: Int, cell: HeatCell)] = []
+        var anchor: Date?
+        for (index, label) in labels.enumerated() where index < days.count {
+            guard let date = formatter.date(from: label) else { continue }
+            if anchor == nil {
+                anchor = calendar.dateInterval(of: .weekOfYear, for: date)?.start
+            }
+            guard let start = anchor else { continue }
+            let day = calendar.startOfDay(for: date)
+            let row = calendar.component(.weekday, from: day) // 周日=1…周六=7
+            let mondayRow = (row + 5) % 7                     // 周一=0…周日=6
+            let week = calendar.dateComponents([.day], from: start, to: day).day.map { $0 / 7 } ?? 0
+            cells.append((mondayRow, week, HeatCell(label: label, tokens: days[index])))
+        }
+        let weeks = (cells.map { $0.week }.max() ?? 0) + 1
+        var columns = Array(repeating: Array<HeatCell?>(repeating: nil, count: 7), count: weeks)
+        for item in cells where item.week >= 0 && item.week < weeks {
+            columns[item.week][item.row] = item.cell
+        }
+        return columns
+    }
+
+    /// 周一=0…周日=6 的短标签；隔行显示（GitHub 风格），其余留空保持格高。
+    private func heatWeekday(_ row: Int) -> String {
+        switch row {
+        case 0: return L("M", "一")
+        case 2: return L("W", "三")
+        case 4: return L("F", "五")
+        case 6: return L("S", "日")
+        default: return ""
+        }
+    }
+
+    /// 平方根压暗部（与折线图同一变换）：0 → 轨道色；有量 → 品牌蓝 0.25…1。
+    private func heatColor(value: Int64, peak: Int64) -> Color {
+        guard value > 0 else { return skin.track }
+        let ratio = Double(value).squareRoot() / Double(peak).squareRoot()
+        return skin.ink(.ai).opacity(0.25 + 0.75 * ratio)
+    }
+
+    private func peakDayText(_ labels: [String], _ days: [Int64]) -> String {
+        guard let peak = days.max(), peak > 0,
+              let index = days.firstIndex(of: peak), index < labels.count else { return "—" }
+        // "2026-11-26" → "11-26"
+        let short = String(labels[index].dropFirst(5))
+        return short + " · " + GlanceFormat.short(peak)
     }
 
     // MARK: 会话卡

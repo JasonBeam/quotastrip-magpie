@@ -237,6 +237,138 @@ enum MagpieDecode {
         }
         return matched ? total : nil
     }
+
+    /// 近 7 天（旧→新）的合并口径 token 序列，AI 用量卡折线图用。
+    /// 返回 (本地日期 "yyyy-MM-dd", input+output+cache_read)；缺记录的那天补 0。
+    /// series 里没有近 7 天的任何一天时返回 nil（整体回退 DSH，不画半截假图）。
+    static func decodeUsageRecentDays(_ data: Data, now: Date = Date())
+        -> (labels: [String], tokens: [Int64])? {
+        guard data.count <= 4 * 1024 * 1024,
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let series = root["series"] as? [[String: Any]] else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        let today = calendar.startOfDay(for: now)
+        var byDay: [Date: Int64] = [:]
+        for day in series {
+            guard let date = parseDate(day["time"] as? String) else { continue }
+            func int64(_ key: String) -> Int64 {
+                (day[key] as? NSNumber).flatMap { $0.int64Value >= 0 ? $0.int64Value : nil } ?? 0
+            }
+            byDay[calendar.startOfDay(for: date)] = int64("input") + int64("output") + int64("cache_read")
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        var labels: [String] = []
+        var tokens: [Int64] = []
+        var matched = false
+        for offset in stride(from: -6, through: 0, by: 1) {
+            guard let date = calendar.date(byAdding: .day, value: offset, to: today) else { return nil }
+            labels.append(formatter.string(from: date))
+            if let value = byDay[date] {
+                tokens.append(value)
+                matched = true
+            } else {
+                tokens.append(0)
+            }
+        }
+        return matched ? (labels, tokens) : nil
+    }
+
+    /// 近 30 天按日热力图（Magpie App Usage 页同款：一天一格，旧→新）。
+    /// 数据源与折线图相同：usage/requests 默认 30d 合并 series。
+    /// 缺记录的天补 0；series 为空返回 nil（整卡隐藏）。
+    static func decodeUsageHeatmap(_ data: Data, now: Date = Date())
+        -> (labels: [String], tokens: [Int64])? {
+        guard data.count <= 4 * 1024 * 1024,
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              (root["bucket"] as? String) == "day",
+              let series = root["series"] as? [[String: Any]], !series.isEmpty else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        let today = calendar.startOfDay(for: now)
+        var byDay: [Date: Int64] = [:]
+        for day in series {
+            guard let date = parseDate(day["time"] as? String) else { continue }
+            func int64(_ key: String) -> Int64 {
+                (day[key] as? NSNumber).flatMap { $0.int64Value >= 0 ? $0.int64Value : nil } ?? 0
+            }
+            byDay[calendar.startOfDay(for: date)] = int64("input") + int64("output") + int64("cache_read")
+        }
+        guard !byDay.isEmpty else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        var labels: [String] = []
+        var tokens: [Int64] = []
+        for offset in stride(from: -29, through: 0, by: 1) {
+            guard let date = calendar.date(byAdding: .day, value: offset, to: today) else { return nil }
+            labels.append(formatter.string(from: date))
+            tokens.append(byDay[date] ?? 0)
+        }
+        return (labels, tokens)
+    }
+
+    /// 今日活跃会话数：GET /v1/magpie/usage?period=today 的 sessions 去重计数。
+    /// 该端点只含网关看到的行（比合并口径少 DSH 日志导入），作为「今日共 N 个」
+    /// 的 Magpie 主源可接受；period 不是 today 的响应拒收，避免把 30d 会话当今日。
+    static func decodeUsageTodaySessions(_ data: Data) -> Int? {
+        guard data.count <= 4 * 1024 * 1024,
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              (root["period"] as? String) == "today",
+              let sessions = root["sessions"] as? [[String: Any]] else { return nil }
+        var ids = Set<String>()
+        for session in sessions {
+            guard let id = session["id"] as? String, !id.isEmpty else { continue }
+            ids.insert(id)
+        }
+        return ids.count
+    }
+
+    /// 千问供应商消耗卡的数据（period=today&provider=qwen 的响应）。
+    struct QwenUsage: Equatable {
+        var calls: Int
+        var tokens: Int64
+        /// 估算成本（US$，Magpie Usage 页价目表口径），面板原样两位小数。
+        var cost: Double?
+        /// 按模型拆分（旧→新按 token 降序），id 已去掉 "qwen/" 前缀。
+        var models: [QwenModelUsage] = []
+    }
+
+    struct QwenModelUsage: Equatable {
+        var name: String
+        var calls: Int
+        var tokens: Int64
+        var cost: Double?
+    }
+
+    /// 只认 period=="today" 的响应；by.modelAt 里只取 "qwen/" 前缀的行，
+    /// session-unknown/…（DSH 日志导入行）不属于千问供应商，严禁混入。
+    static func decodeQwenUsageToday(_ data: Data) -> QwenUsage? {
+        guard data.count <= 4 * 1024 * 1024,
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              (root["period"] as? String) == "today" else { return nil }
+        func int64(_ raw: Any?) -> Int64 {
+            (raw as? NSNumber).flatMap { $0.int64Value >= 0 ? $0.int64Value : nil } ?? 0
+        }
+        let calls = int64(root["calls"])
+        let tokens = int64(root["input"]) + int64(root["output"]) + int64(root["cache_read"])
+        guard calls > 0 || tokens > 0 else { return nil }
+        var usage = QwenUsage(calls: Int(calls), tokens: tokens, cost: number(root["cost"]))
+        let by = root["by"] as? [String: Any]
+        let modelAt = by?["modelAt"] as? [[String: Any]] ?? []
+        usage.models = modelAt.compactMap { item in
+            guard let id = item["id"] as? String, id.hasPrefix("qwen/") else { return nil }
+            let name = String(id.dropFirst("qwen/".count))
+            guard !name.isEmpty else { return nil }
+            return QwenModelUsage(name: name,
+                                  calls: Int(int64(item["calls"])),
+                                  tokens: int64(item["input"]) + int64(item["output"]) + int64(item["cache_read"]),
+                                  cost: number(item["cost"]))
+        }.sorted { $0.tokens > $1.tokens }
+        return usage
+    }
 }
 
 /// Magpie 只读客户端。端口发现：UserDefaults magpie.origin → GET / manifest 校验。
@@ -383,6 +515,16 @@ final class MagpieProvider {
         var todayTotal: Int64?
         /// 本周（周一至今）合并口径合计；Codex 卡右上角小字用它。
         var weekTotal: Int64?
+        /// 近 7 天合并口径序列（旧→新）；AI 用量卡折线图主源，nil 时回退 DSH。
+        var recentDayLabels: [String] = []
+        var recentDayTokens: [Int64] = []
+        /// 近 30 天按日 token（旧→新，与 Magpie App 热力图同口径）；面板热力图用。
+        var heatDayLabels: [String] = []
+        var heatDayTokens: [Int64] = []
+        /// 今日活跃会话数（Magpie 网关口径）；「今日共 N 个」主源。
+        var todaySessions: Int?
+        /// 千问供应商今日消耗（provider=qwen 过滤）；千问卡下方的 Magpie 卡用。
+        var qwenToday: MagpieDecode.QwenUsage?
         var error: String?
         var stale = false
     }
@@ -465,6 +607,25 @@ final class MagpieProvider {
         // 今日合计直接取同一响应的合并 series（含 DSH 日志导入），不再发第二个请求。
         result.todayTotal = MagpieDecode.decodeUsageTodayTotal(data)
         result.weekTotal = MagpieDecode.decodeUsageWeekTotal(data)
+        if let recent = MagpieDecode.decodeUsageRecentDays(data) {
+            result.recentDayLabels = recent.labels
+            result.recentDayTokens = recent.tokens
+        }
+        // 热力图与折线图同源：同一份 30d 合并 series，一天一格（Magpie App 同款）。
+        if let heat = MagpieDecode.decodeUsageHeatmap(data) {
+            result.heatDayLabels = heat.labels
+            result.heatDayTokens = heat.tokens
+        }
+        // 今日会话数 / 千问消耗是补充读数：任何一个失败只让对应区块走兜底或隐藏，
+        // 不影响主 activity（tok/s、今日合计）的可用性。
+        if let sessionsURL = URL(string: "v1/magpie/usage?period=today", relativeTo: origin),
+           let sessionsData = get(session, sessionsURL) {
+            result.todaySessions = MagpieDecode.decodeUsageTodaySessions(sessionsData)
+        }
+        if let qwenURL = URL(string: "v1/magpie/usage/requests?limit=1&period=today&provider=qwen", relativeTo: origin),
+           let qwenData = get(session, qwenURL) {
+            result.qwenToday = MagpieDecode.decodeQwenUsageToday(qwenData)
+        }
         return .ok(result)
     }
 

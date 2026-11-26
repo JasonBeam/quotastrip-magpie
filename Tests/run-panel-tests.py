@@ -85,6 +85,7 @@ def swift_checks() -> bool:
             [*SWIFTC_CMD, "-swift-version", "5", "-target", "arm64-apple-macosx11.0",
              str(SOURCES / "UsagePanel.swift"), str(SOURCES / "DSHSessionProvider.swift"),
              str(SOURCES / "DSHBalanceProvider.swift"), str(SOURCES / "JimmyCloudPlanProvider.swift"),
+             str(SOURCES / "MagpieProvider.swift"),
              str(work / "main.swift"),
              "-o", str(binary), "-framework", "AppKit", "-framework", "SwiftUI"],
             capture_output=True, text=True, timeout=300)
@@ -124,8 +125,11 @@ def source_checks() -> bool:
           "sections no longer paint their own card fills")
     check("qianfanCard" not in panel and "sourceModelRows" in panel,
           "Qianfan is folded into the DeepSeek card instead of a separate card")
-    check("panelSessionsExpanded" in panel and "toggleSessions" in panel,
-          "sessions block can be collapsed and remembers it")
+    check("panelSessionsExpanded" in panel and "toggleSessions" in panel
+          and "\n            sessionsCard\n" not in panel,
+          "sessions card kept in code but no longer rendered (user asked to hide it)")
+    check("Today · local" not in panel and "qwenLocalModelRows" not in panel,
+          "Qwen card no longer draws the local-today row (Magpie covers it)")
     check("UsageWindowMeter(progress:" in panel, "quota meters read an optional progress")
     # 2026-11-24 新口径：面板与 Touch Bar 一致显示「剩余」，不能再出现 used = 100 - remaining。
     check("100 - $0" not in panel, "quota windows no longer derive a used share")
@@ -182,6 +186,22 @@ def source_checks() -> bool:
           "Qwen plan provider is wired into the refresh cycle")
     check("snapshot.qwenPlan = qwenPlanSnapshot" in main,
           "syncPanel fills the qwen plan snapshot field")
+    # 2026-11-26/27 面板扩展：折线 / 会话数换 Magpie 主源，新增千问消耗卡与今日热力图。
+    check("magpieActivity.recentDayTokens" in main
+          and "if !magpieActivity.recentDayTokens.isEmpty" in main,
+          "7-day chart prefers the Magpie merged series, DSH only as fallback")
+    check("magpieTodaySessions" in panel and "snapshot.magpieTodaySessions = magpieActivity.todaySessions" in main,
+          "today session count comes from Magpie first")
+    check("magpieRequestAt" in panel and "Date().timeIntervalSince(at) <= 120" in panel,
+          "working row judges activity from the latest Magpie request (120s)")
+    check("magpieQwenCard" in panel and "if model.snapshot.magpieQwenToday != nil" in panel,
+          "Magpie Qwen provider card exists and hides without data")
+    check("heatmapCard" in panel and "magpieHeatDayTokens" in panel
+          and "magpieHeatDayTokens.contains(where: { $0 > 0 })" in panel,
+          "daily heatmap card exists and hides when all days are zero")
+    check("snapshot.magpieQwenToday = magpieActivity.qwenToday" in main
+          and "snapshot.magpieHeatDayTokens = magpieActivity.heatDayTokens" in main,
+          "syncPanel feeds the new Magpie cards")
 
     return not failures
 
