@@ -196,12 +196,16 @@ def source_checks() -> bool:
           "working row judges activity from the latest Magpie request (120s)")
     check("magpieQwenCard" in panel and "if model.snapshot.magpieQwenToday != nil" in panel,
           "Magpie Qwen provider card exists and hides without data")
-    check("heatmapCard" in panel and "magpieHeatDayTokens" in panel
-          and "magpieHeatDayTokens.contains(where: { $0 > 0 })" in panel,
+    check("Token 消耗" not in panel and "估算成本" not in panel and "主力模型" not in panel,
+          "Qwen Magpie card keeps only the share bar + model rows (user removed duplicate pairs)")
+    check("heatmapCard" in panel and "magpieHeatDays" in panel
+          and "magpieHeatDays.contains(where: { $0.tokens > 0 })" in panel,
           "daily heatmap card exists and hides when all days are zero")
     check("snapshot.magpieQwenToday = magpieActivity.qwenToday" in main
-          and "snapshot.magpieHeatDayTokens = magpieActivity.heatDayTokens" in main,
+          and "snapshot.magpieHeatDays = magpieActivity.heatDays" in main,
           "syncPanel feeds the new Magpie cards")
+    check("heatTooltip" in panel and "个请求" in panel and "magpieFxRate" in panel,
+          "heat cells carry the App-style tooltip: date+weekday, tokens, calls, CNY cost")
 
     return not failures
 

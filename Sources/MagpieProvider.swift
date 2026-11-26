@@ -276,40 +276,6 @@ enum MagpieDecode {
         return matched ? (labels, tokens) : nil
     }
 
-    /// 近 30 天按日热力图（Magpie App Usage 页同款：一天一格，旧→新）。
-    /// 数据源与折线图相同：usage/requests 默认 30d 合并 series。
-    /// 缺记录的天补 0；series 为空返回 nil（整卡隐藏）。
-    static func decodeUsageHeatmap(_ data: Data, now: Date = Date())
-        -> (labels: [String], tokens: [Int64])? {
-        guard data.count <= 4 * 1024 * 1024,
-              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              (root["bucket"] as? String) == "day",
-              let series = root["series"] as? [[String: Any]], !series.isEmpty else { return nil }
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = .current
-        let today = calendar.startOfDay(for: now)
-        var byDay: [Date: Int64] = [:]
-        for day in series {
-            guard let date = parseDate(day["time"] as? String) else { continue }
-            func int64(_ key: String) -> Int64 {
-                (day[key] as? NSNumber).flatMap { $0.int64Value >= 0 ? $0.int64Value : nil } ?? 0
-            }
-            byDay[calendar.startOfDay(for: date)] = int64("input") + int64("output") + int64("cache_read")
-        }
-        guard !byDay.isEmpty else { return nil }
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd"
-        var labels: [String] = []
-        var tokens: [Int64] = []
-        for offset in stride(from: -29, through: 0, by: 1) {
-            guard let date = calendar.date(byAdding: .day, value: offset, to: today) else { return nil }
-            labels.append(formatter.string(from: date))
-            tokens.append(byDay[date] ?? 0)
-        }
-        return (labels, tokens)
-    }
-
     /// Magpie App「用量热力图」的整段历史（约一年，一天一格）。
     /// 公开 /v1 接口只回 30 天；App 自己读的是本地缓存 ~/.cache/magpie/heat-v1.json：
     /// days[] 是 cut 之前已归档的每日合计，cut 当天起用 30d 合并 series 补齐。
@@ -317,18 +283,22 @@ enum MagpieDecode {
     struct HeatDay: Equatable {
         var label: String   // "yyyy-MM-dd"
         var tokens: Int64
+        var calls: Int
+        /// 估算成本（US$）；tooltip 换算 ¥ 用，缺省时不显示金额。
+        var cost: Double?
     }
 
-    static func decodeHeatCache(_ data: Data) -> (cut: Date, days: [String: Int64])? {
+    static func decodeHeatCache(_ data: Data) -> (cut: Date, days: [String: HeatDay])? {
         guard data.count <= 4 * 1024 * 1024,
               let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let cut = parseDate(root["cut"] as? String),
               let array = root["days"] as? [[String: Any]] else { return nil }
-        var days: [String: Int64] = [:]
+        var days: [String: HeatDay] = [:]
         for item in array {
             guard let date = item["date"] as? String, date.count == 10,
                   let tokens = (item["tokens"] as? NSNumber)?.int64Value, tokens >= 0 else { continue }
-            days[date] = tokens
+            let calls = (item["calls"] as? NSNumber).flatMap { $0.intValue >= 0 ? $0.intValue : nil } ?? 0
+            days[date] = HeatDay(label: date, tokens: tokens, calls: calls, cost: number(item["cost"]))
         }
         guard !days.isEmpty else { return nil }
         return (cut, days)
@@ -337,9 +307,9 @@ enum MagpieDecode {
     /// 合并整段热力：缓存里 cut 之前的天 + 30d series 里 cut 当天起的天。
     /// 输出从「最早有数据那周的周一」到今天的连续日序列（无数据的天补 0），
     /// 与 App 一样只在窗口内画格；两边都没有数据返回 nil。
-    static func mergeHeatmap(cached: (cut: Date, days: [String: Int64])?,
-                             series: (labels: [String], tokens: [Int64])?,
-                             now: Date = Date()) -> (labels: [String], tokens: [Int64])? {
+    static func mergeHeatmap(cached: (cut: Date, days: [String: HeatDay])?,
+                             series: [HeatDay]?,
+                             now: Date = Date()) -> [HeatDay]? {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = .current
         calendar.firstWeekday = 2
@@ -347,39 +317,103 @@ enum MagpieDecode {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd"
         let today = calendar.startOfDay(for: now)
-        var byDay: [Date: Int64] = [:]
+        var byDay: [Date: HeatDay] = [:]
         var earliest: Date?
         if let cached {
             let cutDay = calendar.startOfDay(for: cached.cut)
-            for (label, tokens) in cached.days {
+            for (label, item) in cached.days {
                 guard let date = formatter.date(from: label) else { continue }
                 let day = calendar.startOfDay(for: date)
                 guard day < cutDay else { continue }   // cut 起以实时 series 为准
-                byDay[day] = tokens
+                byDay[day] = item
                 if earliest == nil || day < earliest! { earliest = day }
             }
         }
         if let series {
-            for (index, label) in series.labels.enumerated() where index < series.tokens.count {
-                guard let date = formatter.date(from: label) else { continue }
+            for item in series {
+                guard let date = formatter.date(from: item.label) else { continue }
                 let day = calendar.startOfDay(for: date)
-                byDay[day] = series.tokens[index]
+                byDay[day] = item
                 if earliest == nil || day < earliest! { earliest = day }
             }
         }
         guard let first = earliest,
               let start = calendar.dateInterval(of: .weekOfYear, for: first)?.start,
               start <= today else { return nil }
-        var labels: [String] = []
-        var tokens: [Int64] = []
+        var out: [HeatDay] = []
         var day = start
         while day <= today {
-            labels.append(formatter.string(from: day))
-            tokens.append(byDay[day] ?? 0)
+            let label = formatter.string(from: day)
+            out.append(byDay[day] ?? HeatDay(label: label, tokens: 0, calls: 0, cost: nil))
             guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
             day = next
         }
-        return (labels, tokens)
+        return out
+    }
+
+    /// 30d 合并 series → HeatDay 序列（补 calls/cost，tooltip 用）。
+    static func decodeUsageHeatDays(_ data: Data) -> [HeatDay]? {
+        guard data.count <= 4 * 1024 * 1024,
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              (root["bucket"] as? String) == "day",
+              let series = root["series"] as? [[String: Any]], !series.isEmpty else { return nil }
+        var out: [HeatDay] = []
+        for item in series {
+            guard let date = parseDate(item["time"] as? String) else { continue }
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "yyyy-MM-dd"
+            func int64(_ key: String) -> Int64 {
+                (item[key] as? NSNumber).flatMap { $0.int64Value >= 0 ? $0.int64Value : nil } ?? 0
+            }
+            let calls = (item["calls"] as? NSNumber).flatMap { $0.intValue >= 0 ? $0.intValue : nil } ?? 0
+            out.append(HeatDay(label: formatter.string(from: date),
+                               tokens: int64("input") + int64("output") + int64("cache_read"),
+                               calls: calls, cost: number(item["cost"])))
+        }
+        return out.isEmpty ? nil : out
+    }
+
+    /// App 的 USD→CNY 汇率缓存（~/.cache/magpie/fxrate.json，只读）。
+    /// 读不到返回 nil：tooltip 退回显示 US$，不猜汇率。
+    static func decodeFxRate(_ data: Data) -> Double? {
+        guard data.count <= 64 * 1024,
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let rate = number(root["rate"]), rate > 0, rate < 100 else { return nil }
+        return rate
+    }
+
+    /// 当 heat-v1.json 被清空时，从 usage.jsonl 重建（只读，不写不删）。
+    /// usage.jsonl 每行一个请求，按天聚合 tokens/calls/cost。
+    static func rebuildHeatCache(from data: Data, cut: Date?) -> (cut: Date, days: [String: HeatDay])? {
+        guard data.count <= 16 * 1024 * 1024 else { return nil }
+        let text = String(decoding: data, as: UTF8.self)
+        var byDay: [String: (tokens: Int64, calls: Int, cost: Double)] = [:]
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        for line in text.split(separator: "\n") where !line.isEmpty {
+            guard let row = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any],
+                  let t = row["t"] as? String, t.count >= 10 else { continue }
+            let dateStr = String(t.prefix(10))
+            guard let _ = formatter.date(from: dateStr) else { continue }
+            // 跳过 probe/model_list 等内部流量
+            if let source = row["source"] as? String, source == "probe" { continue }
+            if let kind = row["kind"] as? String, kind == "model_list" { continue }
+            func int64(_ key: String) -> Int64 {
+                (row[key] as? NSNumber).flatMap { $0.int64Value >= 0 ? $0.int64Value : nil } ?? 0
+            }
+            let tokens = int64("in") + int64("out") + int64("cache_read")
+            guard tokens > 0 else { continue }
+            let existing = byDay[dateStr] ?? (0, 0, 0)
+            byDay[dateStr] = (existing.tokens + tokens, existing.calls + 1, existing.cost)
+        }
+        guard !byDay.isEmpty else { return nil }
+        let cutDay = cut ?? Date()
+        let days: [String: HeatDay] = byDay.map { (label, v) in
+            (label, HeatDay(label: label, tokens: v.tokens, calls: v.calls, cost: nil))
+        }.reduce(into: [:]) { $0[$1.0] = $1.1 }
+        return (cutDay, days)
     }
 
     /// 今日活跃会话数：GET /v1/magpie/usage?period=today 的 sessions 去重计数。
@@ -590,9 +624,10 @@ final class MagpieProvider {
         /// 近 7 天合并口径序列（旧→新）；AI 用量卡折线图主源，nil 时回退 DSH。
         var recentDayLabels: [String] = []
         var recentDayTokens: [Int64] = []
-        /// 整段按日 token（旧→新，与 Magpie App「用量热力图」同窗口同口径）；面板热力图用。
-        var heatDayLabels: [String] = []
-        var heatDayTokens: [Int64] = []
+        /// 整段按日明细（旧→新，与 Magpie App「用量热力图」同窗口同口径）；面板热力图用。
+        var heatDays: [MagpieDecode.HeatDay] = []
+        /// App 同款 USD→CNY 汇率（只读缓存）；nil 时 tooltip 显示 US$。
+        var fxRate: Double?
         /// 今日活跃会话数（Magpie 网关口径）；「今日共 N 个」主源。
         var todaySessions: Int?
         /// 千问供应商今日消耗（provider=qwen 过滤）；千问卡下方的 Magpie 卡用。
@@ -686,16 +721,29 @@ final class MagpieProvider {
         // 热力图 = App 同款整段历史：~/.cache/magpie/heat-v1.json（cut 前已归档的
         // 每日合计，只读）+ 同一份 30d 合并 series 补 cut 起的最近几天。
         // 缓存读不到时退回纯 30d series，卡片仍可用，只是窗口短。
-        let recent = MagpieDecode.decodeUsageHeatmap(data)
-        var cached: (cut: Date, days: [String: Int64])?
+        let recent = MagpieDecode.decodeUsageHeatDays(data)
+        var cached: (cut: Date, days: [String: MagpieDecode.HeatDay])?
         let cacheURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".cache/magpie/heat-v1.json")
         if let cacheData = try? Data(contentsOf: cacheURL) {
             cached = MagpieDecode.decodeHeatCache(cacheData)
         }
+        // heat-v1.json 被 Magpie 清空时（只剩 cut，days 为空），从 usage.jsonl 重建。
+        // usage.jsonl 是 Magpie 的原始请求日志，不会被清，按天聚合即可。
+        if cached?.days.isEmpty == true {
+            let usageURL = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".config/magpie/usage.jsonl")
+            if let usageData = try? Data(contentsOf: usageURL) {
+                cached = MagpieDecode.rebuildHeatCache(from: usageData, cut: cached?.cut)
+            }
+        }
         if let heat = MagpieDecode.mergeHeatmap(cached: cached, series: recent) {
-            result.heatDayLabels = heat.labels
-            result.heatDayTokens = heat.tokens
+            result.heatDays = heat
+        }
+        let fxURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cache/magpie/fxrate.json")
+        if let fxData = try? Data(contentsOf: fxURL) {
+            result.fxRate = MagpieDecode.decodeFxRate(fxData)
         }
         // 今日会话数 / 千问消耗是补充读数：任何一个失败只让对应区块走兜底或隐藏，
         // 不影响主 activity（tok/s、今日合计）的可用性。

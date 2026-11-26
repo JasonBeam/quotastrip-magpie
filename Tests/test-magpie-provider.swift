@@ -272,21 +272,24 @@ struct MagpieTests {
         expect(MagpieDecode.decodeUsageRecentDays(Data(#"{"rows":[],"series":[]}"#.utf8), now: day) == nil,
                "no overlap → nil (DSH fallback)")
 
-        // 近 30 天热力图：与折线同源的按日 series；缺的天补 0，一天一格。
+        // 按日明细（tooltip 用）：calls/cost 一并解出；hour bucket 拒收。
         let heatSample = """
         {"bucket":"day","rows":[],"series":[
-          {"label":"Oct 29","time":"2026-10-29T00:00:00+08:00","input":50,"output":5,"cache_read":45},
-          {"label":"Nov 26","time":"2026-11-26T00:00:00+08:00","input":200,"output":20,"cache_read":1800}]}
+          {"label":"Oct 29","time":"2026-10-29T00:00:00+08:00","calls":7,"input":50,"output":5,"cache_read":45,"cost":0.5},
+          {"label":"Nov 26","time":"2026-11-26T00:00:00+08:00","calls":223,"input":200,"output":20,"cache_read":1800,"cost":9.27}]}
         """
-        let heat = MagpieDecode.decodeUsageHeatmap(Data(heatSample.utf8), now: day)!
-        expect(heat.labels.count == 30 && heat.labels.first == "2026-10-28" && heat.labels.last == "2026-11-26",
-               "heatmap: 30 daily slots old→new")
-        expect(heat.tokens[1] == 100 && heat.tokens[29] == 2020 && heat.tokens[0] == 0 && heat.tokens[15] == 0,
-               "heatmap: missing days zero, matched days summed")
-        expect(MagpieDecode.decodeUsageHeatmap(Data(#"{"bucket":"day","rows":[],"series":[]}"#.utf8), now: day) == nil,
+        let heat = MagpieDecode.decodeUsageHeatDays(Data(heatSample.utf8))!
+        expect(heat.count == 2 && heat[0].label == "2026-10-29" && heat[1].label == "2026-11-26",
+               "heat days: local date labels")
+        expect(heat[1].tokens == 2020 && heat[1].calls == 223 && heat[1].cost == 9.27,
+               "heat day carries tokens/calls/cost for tooltip")
+        expect(MagpieDecode.decodeUsageHeatDays(Data(#"{"bucket":"day","rows":[],"series":[]}"#.utf8)) == nil,
                "empty heatmap → nil (card hidden)")
-        expect(MagpieDecode.decodeUsageHeatmap(Data(#"{"period":"today","bucket":"hour","series":[{"label":"00"}]}"#.utf8), now: day) == nil,
+        expect(MagpieDecode.decodeUsageHeatDays(Data(#"{"period":"today","bucket":"hour","series":[{"label":"00"}]}"#.utf8)) == nil,
                "hourly bucket rejected as daily heatmap")
+        expect(MagpieDecode.decodeFxRate(Data(#"{"rate":6.678179,"at":"2026-11-26T12:18:43+08:00"}"#.utf8)) == 6.678179,
+               "fx rate decoded")
+        expect(MagpieDecode.decodeFxRate(Data(#"{"rate":0}"#.utf8)) == nil, "zero fx rejected")
 
         // 整段热力：App 缓存（cut 前归档）+ 实时 series（cut 起）合并。
         let cacheSample = """
@@ -297,18 +300,22 @@ struct MagpieTests {
         """
         let cached = MagpieDecode.decodeHeatCache(Data(cacheSample.utf8))!
         expect(cached.days.count == 3, "heat cache days decoded")
+        expect(cached.days["2026-11-24"]?.calls == 20 && cached.days["2026-11-24"]?.cost == 2.0,
+               "cached day keeps calls/cost")
         expect(MagpieDecode.decodeHeatCache(Data(#"{"days":[]}"#.utf8)) == nil, "cache without cut rejected")
-        let liveSeries = (labels: ["2026-11-25", "2026-11-26"], tokens: [Int64(3000), Int64(4000)])
+        let liveSeries = [MagpieDecode.HeatDay(label: "2026-11-25", tokens: 3000, calls: 30, cost: 3.0),
+                          MagpieDecode.HeatDay(label: "2026-11-26", tokens: 4000, calls: 40, cost: 4.0)]
         let full = MagpieDecode.mergeHeatmap(cached: cached, series: liveSeries, now: day)!
         // 起点 = 最早数据 11-20（周五）所在周的周一 11-16；终点 11-26。
-        expect(full.labels.first == "2026-11-16" && full.labels.last == "2026-11-26" && full.labels.count == 11,
+        expect(full.first?.label == "2026-11-16" && full.last?.label == "2026-11-26" && full.count == 11,
                "merged heat spans Monday-of-first-week .. today")
-        func heatAt(_ label: String) -> Int64 { full.tokens[full.labels.firstIndex(of: label)!] }
-        expect(heatAt("2026-11-20") == 1000 && heatAt("2026-11-24") == 2000, "cached days kept")
-        expect(heatAt("2026-11-25") == 3000, "cut day comes from live series, not stale cache")
-        expect(heatAt("2026-11-26") == 4000 && heatAt("2026-11-16") == 0, "live tail kept, gaps zero")
+        func heatAt(_ label: String) -> MagpieDecode.HeatDay { full.first { $0.label == label }! }
+        expect(heatAt("2026-11-20").tokens == 1000 && heatAt("2026-11-24").tokens == 2000, "cached days kept")
+        expect(heatAt("2026-11-25").tokens == 3000 && heatAt("2026-11-25").calls == 30,
+               "cut day comes from live series, not stale cache")
+        expect(heatAt("2026-11-26").tokens == 4000 && heatAt("2026-11-16").tokens == 0, "live tail kept, gaps zero")
         let seriesOnly = MagpieDecode.mergeHeatmap(cached: nil, series: liveSeries, now: day)!
-        expect(seriesOnly.labels.first == "2026-11-23" && seriesOnly.labels.count == 4,
+        expect(seriesOnly.first?.label == "2026-11-23" && seriesOnly.count == 4,
                "no cache → series-only week fallback")
         expect(MagpieDecode.mergeHeatmap(cached: nil, series: nil, now: day) == nil, "no data → nil")
 

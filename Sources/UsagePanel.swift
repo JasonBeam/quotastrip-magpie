@@ -91,9 +91,10 @@ struct UsageSnapshot: Equatable {
     var qwenPlanStale = false
     /// Magpie 千问供应商今日消耗（provider=qwen）；nil 时该卡隐藏。
     var magpieQwenToday: MagpieDecode.QwenUsage?
-    /// 整段按日 token（Magpie App 热力图同窗口，旧→新）；nil/全 0 时热力图卡隐藏。
-    var magpieHeatDayLabels: [String] = []
-    var magpieHeatDayTokens: [Int64] = []
+    /// 整段按日明细（Magpie App 热力图同窗口，旧→新）；nil/全 0 时热力图卡隐藏。
+    var magpieHeatDays: [MagpieDecode.HeatDay] = []
+    /// App 同款 USD→CNY 汇率；nil 时 tooltip 显示 US$。
+    var magpieFxRate: Double?
     /// 今日活跃会话数（Magpie 网关口径）；nil 时回退 DSH 读数。
     var magpieTodaySessions: Int?
     /// 最近一条真实对话请求的时刻（Magpie rows）；「N 个会话进行中」判活跃用。
@@ -414,8 +415,8 @@ struct UsagePanelView: View {
                 magpieQwenCard
             }
             // Magpie 用量热力图（整段历史、一天一格，与 App 同窗口）：无数据时整卡不出现。
-            if model.snapshot.magpieHeatDayTokens.contains(where: { $0 > 0 }) {
-                heatmapCard(model.snapshot.magpieHeatDayLabels, model.snapshot.magpieHeatDayTokens)
+            if model.snapshot.magpieHeatDays.contains(where: { $0.tokens > 0 }) {
+                heatmapCard(model.snapshot.magpieHeatDays)
             }
             // 会话卡与千问「今日本地」行已按用户要求下线（Magpie 已覆盖这两块读数）；
             // 会话卡实现保留在下方，需要时把 sessionsCard 加回这里即可。
@@ -884,9 +885,9 @@ struct UsagePanelView: View {
     // MARK: Magpie 千问供应商卡（今日消耗 + 按模型；跟在 Token Plan 卡下方）
 
     private var magpieQwenCard: some View {
-        let usage = model.snapshot.magpieQwenToday
         // 按模型行复用 Codex 卡的 models 组件：份额条 + 名称 + token 短数字。
-        let rows = (usage?.models ?? []).map { UsageModelRow(name: $0.name, tokens: $0.tokens) }
+        let rows = (model.snapshot.magpieQwenToday?.models ?? [])
+            .map { UsageModelRow(name: $0.name, tokens: $0.tokens) }
         return card {
             VStack(alignment: .leading, spacing: 0) {
                 head(title: L("Qwen via Magpie", "千问 · Magpie"),
@@ -896,29 +897,20 @@ struct UsagePanelView: View {
                     Spacer().frame(height: PanelStyle.blockGap)
                     models(rows, brand: .ai)
                 }
-                Spacer().frame(height: PanelStyle.blockGap)
-                pairs([(L("Tokens", "Token 消耗"),
-                        usage.map { GlanceFormat.short($0.tokens) } ?? "—"),
-                       (L("Calls", "请求"),
-                        usage.map { GlanceFormat.grouped(Int64($0.calls)) } ?? "—")])
-                if let cost = usage?.cost {
-                    Spacer().frame(height: PanelStyle.blockGap)
-                    pairs([(L("Est. cost", "估算成本"), String(format: "$%.2f", cost)),
-                           (L("Top model", "主力模型"),
-                            usage?.models.first.map { shortModelName($0.name) } ?? "—")])
-                }
+                // 用户 2026-11-27：汇总四行与模型行信息重复，只留份额条 + 按模型数字；
+                // 数据仍解码保留（Touch Bar/后续可用）。
             }
         }
     }
 
     // MARK: Magpie 用量热力图（App 同款：整段历史、月份表头、周一…周日七行）
 
-    private func heatmapCard(_ labels: [String], _ days: [Int64]) -> some View {
-        let peak = max(days.max() ?? 1, 1)
-        let total = days.reduce(Int64(0), +)
-        let active = days.filter { $0 > 0 }.count
+    private func heatmapCard(_ days: [MagpieDecode.HeatDay]) -> some View {
+        let peak = max(days.map { $0.tokens }.max() ?? 1, 1)
+        let total = days.reduce(Int64(0)) { $0 + $1.tokens }
+        let active = days.filter { $0.tokens > 0 }.count
         // 按周分列（周一开头），一列一周、七行；数据范围外的格留空槽。
-        let columns = heatColumns(labels, days)
+        let columns = heatColumns(days)
         // 格子尺寸按列数自适应：444pt 里去掉左侧星期标签后铺满整行。
         let labelWidth: CGFloat = 30
         let gap: CGFloat = 3
@@ -962,7 +954,7 @@ struct UsagePanelView: View {
                                         RoundedRectangle(cornerRadius: 2.5, style: .continuous)
                                             .fill(heatColor(value: item.tokens, peak: peak))
                                             .frame(width: cell, height: cell)
-                                            .help(item.label + " · " + GlanceFormat.short(item.tokens))
+                                            .help(heatTooltip(item))
                                     } else {
                                         Color.clear.frame(width: cell, height: cell)
                                     }
@@ -974,7 +966,7 @@ struct UsagePanelView: View {
                 }
                 Spacer().frame(height: PanelStyle.blockGap)
                 pairs([(L("Total", "合计"), GlanceFormat.short(total)),
-                       (L("Peak day", "峰值日"), peakDayText(labels, days))])
+                       (L("Peak day", "峰值日"), peakDayText(days))])
             }
         }
     }
@@ -987,7 +979,7 @@ struct UsagePanelView: View {
                 .foregroundColor(skin.text3)
             RoundedRectangle(cornerRadius: 2, style: .continuous)
                 .fill(skin.track).frame(width: 9, height: 9)
-            ForEach([0.3, 0.55, 0.8, 1.0], id: \.self) { level in
+            ForEach([0.35, 0.55, 0.78, 1.0], id: \.self) { level in
                 RoundedRectangle(cornerRadius: 2, style: .continuous)
                     .fill(skin.ink(.ai).opacity(level)).frame(width: 9, height: 9)
             }
@@ -999,7 +991,7 @@ struct UsagePanelView: View {
     }
 
     /// 该列周首日的月份；只在与上一列不同月时显示（第一列必显）。
-    private func heatMonthLabel(_ columns: [[HeatCell?]], _ index: Int) -> String {
+    private func heatMonthLabel(_ columns: [[MagpieDecode.HeatDay?]], _ index: Int) -> String {
         guard let first = columns[index].compactMap({ $0 }).first else { return "" }
         let month = String(first.label.dropFirst(5).prefix(2))
         if index > 0, let prev = columns[index - 1].compactMap({ $0 }).first,
@@ -1009,23 +1001,18 @@ struct UsagePanelView: View {
         return month.hasPrefix("0") ? String(month.dropFirst()) + L("", "月") : month + L("", "月")
     }
 
-    private struct HeatCell {
-        var label: String
-        var tokens: Int64
-    }
-
-    /// 把 (日期, token) 序列铺进「周一开头」的周列；不在序列里的格是 nil（空槽）。
-    private func heatColumns(_ labels: [String], _ days: [Int64]) -> [[HeatCell?]] {
+    /// 把按日明细铺进「周一开头」的周列；不在序列里的格是 nil（空槽）。
+    private func heatColumns(_ days: [MagpieDecode.HeatDay]) -> [[MagpieDecode.HeatDay?]] {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = .current
         calendar.firstWeekday = 2
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd"
-        var cells: [(row: Int, week: Int, cell: HeatCell)] = []
+        var cells: [(row: Int, week: Int, cell: MagpieDecode.HeatDay)] = []
         var anchor: Date?
-        for (index, label) in labels.enumerated() where index < days.count {
-            guard let date = formatter.date(from: label) else { continue }
+        for item in days {
+            guard let date = formatter.date(from: item.label) else { continue }
             if anchor == nil {
                 anchor = calendar.dateInterval(of: .weekOfYear, for: date)?.start
             }
@@ -1034,10 +1021,10 @@ struct UsagePanelView: View {
             let row = calendar.component(.weekday, from: day) // 周日=1…周六=7
             let mondayRow = (row + 5) % 7                     // 周一=0…周日=6
             let week = calendar.dateComponents([.day], from: start, to: day).day.map { $0 / 7 } ?? 0
-            cells.append((mondayRow, week, HeatCell(label: label, tokens: days[index])))
+            cells.append((mondayRow, week, item))
         }
         let weeks = (cells.map { $0.week }.max() ?? 0) + 1
-        var columns = Array(repeating: Array<HeatCell?>(repeating: nil, count: 7), count: weeks)
+        var columns = Array(repeating: Array<MagpieDecode.HeatDay?>(repeating: nil, count: 7), count: weeks)
         for item in cells where item.week >= 0 && item.week < weeks {
             columns[item.week][item.row] = item.cell
         }
@@ -1055,19 +1042,67 @@ struct UsagePanelView: View {
         }
     }
 
-    /// 平方根压暗部（与折线图同一变换）：0 → 轨道色；有量 → 品牌蓝 0.25…1。
+    /// App 同款四档量化着色：0 → 轨道色；有量按 sqrt 比例分四档蓝，
+    /// 档间对比明显（用户反馈渐变式颜色区分不出来）。
     private func heatColor(value: Int64, peak: Int64) -> Color {
         guard value > 0 else { return skin.track }
         let ratio = Double(value).squareRoot() / Double(peak).squareRoot()
-        return skin.ink(.ai).opacity(0.25 + 0.75 * ratio)
+        let level: Double
+        switch ratio {
+        case ..<0.35: level = 0.35
+        case ..<0.6: level = 0.55
+        case ..<0.85: level = 0.78
+        default: level = 1.0
+        }
+        return skin.ink(.ai).opacity(level)
     }
 
-    private func peakDayText(_ labels: [String], _ days: [Int64]) -> String {
-        guard let peak = days.max(), peak > 0,
-              let index = days.firstIndex(of: peak), index < labels.count else { return "—" }
+    /// App 同款悬停明细：「2026年11月27日 周五 · 3678.2 万 token · 223 个请求 · ¥9.27」。
+    /// 汇率读 App 的 fxrate 缓存；读不到显示 US$，不猜汇率。
+    private func heatTooltip(_ day: MagpieDecode.HeatDay) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        var dateText = day.label
+        if let date = formatter.date(from: day.label) {
+            let weekday = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"]
+            let index = Calendar.current.component(.weekday, from: date) - 1
+            let parts = day.label.split(separator: "-")
+            if parts.count == 3 {
+                dateText = L("\(day.label)", "\(parts[0])年\(Int(parts[1]) ?? 0)月\(Int(parts[2]) ?? 0)日")
+                    + " " + L("", weekday[index])
+            }
+        }
+        if day.tokens <= 0 && day.calls <= 0 {
+            return dateText + " · " + L("no usage", "无用量")
+        }
+        var text = dateText + "\n" + heatTokensText(day.tokens) + " token"
+        if day.calls > 0 {
+            text += " · " + L("\(day.calls) calls", "\(day.calls) 个请求")
+        }
+        if let cost = day.cost {
+            if let fx = model.snapshot.magpieFxRate {
+                text += " · ¥" + String(format: "%.2f", cost * fx)
+            } else {
+                text += " · $" + String(format: "%.2f", cost)
+            }
+        }
+        return text
+    }
+
+    /// App 口径的 token 写法：≥1 万给一位小数「3678.2 万」，≥1 亿「3.8 亿」。
+    private func heatTokensText(_ value: Int64) -> String {
+        let n = Double(value)
+        if n >= 100_000_000 { return String(format: "%.1f", n / 100_000_000) + L("B", " 亿") }
+        if n >= 10_000 { return String(format: "%.1f", n / 10_000) + L("0K", " 万") }
+        return GlanceFormat.grouped(value)
+    }
+
+    private func peakDayText(_ days: [MagpieDecode.HeatDay]) -> String {
+        guard let top = days.max(by: { $0.tokens < $1.tokens }), top.tokens > 0 else { return "—" }
         // "2026-11-26" → "11-26"
-        let short = String(labels[index].dropFirst(5))
-        return short + " · " + GlanceFormat.short(peak)
+        let short = String(top.label.dropFirst(5))
+        return short + " · " + GlanceFormat.short(top.tokens)
     }
 
     // MARK: 会话卡
@@ -1544,6 +1579,9 @@ final class UsagePanelController: NSObject {
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.level = .statusBar
+        // 非激活面板默认不收 mouse-moved，SwiftUI 的 .help 悬停提示（热力图每日明细）
+        // 依赖它才能触发；只开这一个开关，不改焦点/点击行为。
+        panel.acceptsMouseMovedEvents = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.hidesOnDeactivate = false
         panel.isMovable = false
