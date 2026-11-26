@@ -1,5 +1,11 @@
 # QuotaStrip
 
+> **当前本地版本：Codex + Magpie 实时模块（+ 可选 DeepSeek）。**
+> Codex 剩余额度（5h/7d）优先读 Magpie 本机只读接口，失败回退 app-server / session 日志；
+> 第二模块用 Magpie logo 显示 TokenPlan 剩余%（一位小数、无进度条）、今日 token、
+> 当前对话模型 / 缓存命中率 / tok/s（DSH 解码口径）；DeepSeek 紧凑模块默认隐藏、状态菜单可开。
+> DSH 余额/用量服务保留作数据源与兜底。请先阅读[配置说明](docs/deepseek.zh-CN.md)。下方上游 Claude 文案和截图属于旧版本。
+
 **在 MacBook Pro 的 Touch Bar 上实时显示 Claude Code 和 Codex 的额度。**
 
 [English](README.md)

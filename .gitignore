@@ -11,3 +11,6 @@ QuotaStrip.app/
 # Python
 __pycache__/
 *.pyc
+
+# Local rollback backups (never publish)
+*.bak-*

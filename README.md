@@ -1,5 +1,7 @@
 # QuotaStrip
 
+> **Local version: Codex + DeepSeek.** This checkout displays Codex remaining quota and DeepSeek API balance. See the [setup guide](docs/deepseek.zh-CN.md). The upstream Claude instructions and screenshots below describe the older version.
+
 **See your Claude Code and Codex usage quota right on the MacBook Pro Touch Bar.**
 
 [简体中文](README.zh-CN.md)

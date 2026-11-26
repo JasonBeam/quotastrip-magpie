@@ -1,0 +1,512 @@
+import Foundation
+
+/// Magpie 本机管理层的只读额度视图（GET /v1/magpie/quotas）。
+/// 只走 loopback，无需任何 key；不读 gateway.json / logins.json 等凭据文件。
+struct MagpieWindow: Equatable {
+    let name: String
+    let used: Double?
+    let remaining: Double?
+    let resetsAt: Date?
+    /// 上游给了 display（如 "Unknown"）时以它为准，不再按数字画。
+    let display: String?
+    let lane: String?
+}
+
+struct MagpieQuota: Equatable {
+    let provider: String
+    let name: String
+    let kind: String
+    let plan: String
+    let user: String
+    let windows: [MagpieWindow]
+    let balance: String?
+    let readAt: Date?
+    let resetsCount: Int
+    /// 上游 error 原文保留，面板/菜单直接展示（如 qwen 需登录、deepseek TLS）。
+    let error: String?
+    let lastServedAt: Date?
+
+    /// 有真实窗口且无 error 才算「可用」；qwen 未登录时 windows=[] + error。
+    var isUsable: Bool { error == nil && !windows.isEmpty }
+
+    func window(named name: String) -> MagpieWindow? {
+        windows.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+    }
+}
+
+/// 账号清单（GET /v1/magpie/accounts）。掩码 label 不持久化、不入模型。
+struct MagpieAccount: Equatable {
+    let provider: String
+    let id: String
+    let kind: String
+    let on: Bool
+    let plan: String
+    let user: String
+}
+
+enum MagpieDecodeError: Error { case oversized, invalidJSON, invalidEntry }
+
+enum MagpieDecode {
+    /// ISO8601 带小数秒/不带、Z 或 +08:00 都接受；缺时区按非法。
+    static func parseDate(_ raw: Any?) -> Date? {
+        guard let text = raw as? String, !text.isEmpty else { return nil }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: text) { return date }
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return plain.date(from: text)
+    }
+
+    private static func number(_ raw: Any?) -> Double? {
+        guard let value = raw as? NSNumber, !(raw is Bool) else { return nil }
+        let double = value.doubleValue
+        return double.isFinite ? double : nil
+    }
+
+    private static func text(_ raw: Any?) -> String { raw as? String ?? "" }
+
+    /// 宽松解码：字段缺失给默认值；error 原样保留。顶层必须是 {data:[…]}。
+    static func decodeQuotas(_ data: Data) throws -> [MagpieQuota] {
+        guard data.count <= 512 * 1024 else { throw MagpieDecodeError.oversized }
+        guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let array = root["data"] as? [[String: Any]] else {
+            throw MagpieDecodeError.invalidJSON
+        }
+        return try array.map { raw in
+            let provider = text(raw["provider"])
+            guard !provider.isEmpty else { throw MagpieDecodeError.invalidEntry }
+            let windows: [MagpieWindow] = (raw["windows"] as? [[String: Any]] ?? []).compactMap { item in
+                let name = text(item["name"])
+                guard !name.isEmpty else { return nil }
+                return MagpieWindow(name: name,
+                                    used: number(item["used"]),
+                                    remaining: number(item["remaining"]),
+                                    resetsAt: parseDate(item["resetsAt"]),
+                                    display: item["display"] as? String,
+                                    lane: item["lane"] as? String)
+            }
+            let resets = raw["resets"] as? [String: Any]
+            let count = (resets?["count"] as? NSNumber).flatMap { $0.intValue >= 0 ? $0.intValue : nil } ?? 0
+            return MagpieQuota(provider: provider,
+                               name: text(raw["name"]),
+                               kind: text(raw["kind"]),
+                               plan: text(raw["plan"]),
+                               user: text(raw["user"]),
+                               windows: windows,
+                               balance: raw["balance"] as? String,
+                               readAt: parseDate(raw["readAt"]),
+                               resetsCount: count,
+                               error: (raw["error"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+                               lastServedAt: parseDate(raw["lastServedAt"]))
+        }
+    }
+
+    static func decodeAccounts(_ data: Data) throws -> [MagpieAccount] {
+        guard data.count <= 256 * 1024 else { throw MagpieDecodeError.oversized }
+        guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let array = root["data"] as? [[String: Any]] else {
+            throw MagpieDecodeError.invalidJSON
+        }
+        return array.compactMap { raw in
+            let provider = text(raw["provider"])
+            guard !provider.isEmpty else { return nil }
+            return MagpieAccount(provider: provider,
+                                 id: text(raw["id"]),
+                                 kind: text(raw["kind"]),
+                                 on: (raw["on"] as? NSNumber)?.boolValue ?? false,
+                                 plan: text(raw["plan"]),
+                                 user: text(raw["user"]))
+        }
+    }
+
+    /// GET / 的 manifest：name=="magpie" 才认这个端口。
+    static func isManifest(_ data: Data) -> Bool {
+        guard data.count <= 64 * 1024,
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return false }
+        return root["name"] as? String == "magpie"
+    }
+
+    /// GET /v1/magpie/usage/requests 的单行（只取需要的字段）。
+    struct RequestRow {
+        let at: Date
+        let agent: String
+        let session: String
+        let model: String
+        let input: Int64
+        let output: Int64
+        let cacheRead: Int64
+        let ms: Int64
+        let status: Int
+        let source: String?
+        /// 首 token 时延（ms）；DSH 口径解码时长 = ms - ttft。
+        let ttftMs: Int64?
+        let reasoning: Int64
+
+        /// 日志导入行（source=="log"，ms==0）没有计时，不能算 tok/s。
+        var hasTiming: Bool { ms > 0 && source != "log" }
+        var totalTokens: Int64 { input + output + cacheRead }
+        /// DSH 用量口径的缓存命中率：cacheRead / (input + cacheRead)。
+        var cacheHitPercent: Double? {
+            let denominator = input + cacheRead
+            guard denominator > 0 else { return nil }
+            return Double(cacheRead) / Double(denominator) * 100
+        }
+        /// DSH decodeSpeed 口径：输出 token ÷（完成时刻 − 首 token 时刻）。
+        /// Magpie 行里 ms 是整请求时长、ttft_ms 是首 token 时延，差值即解码时长。
+        var tokensPerSecond: Double? {
+            guard hasTiming, output > 0, let ttft = ttftMs else { return nil }
+            let decodeMs = ms - ttft
+            guard decodeMs > 0 else { return nil }
+            return Double(output) / (Double(decodeMs) / 1000)
+        }
+    }
+
+    /// 宽松解码逐请求行；坏行跳过，不影响其它行。
+    static func decodeRequests(_ data: Data) throws -> [RequestRow] {
+        guard data.count <= 4 * 1024 * 1024 else { throw MagpieDecodeError.oversized }
+        guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let array = root["rows"] as? [[String: Any]] else {
+            throw MagpieDecodeError.invalidJSON
+        }
+        return array.compactMap { raw in
+            guard let at = parseDate(raw["t"]) else { return nil }
+            func int64(_ key: String) -> Int64 {
+                (raw[key] as? NSNumber).flatMap { $0.int64Value >= 0 ? $0.int64Value : nil } ?? 0
+            }
+            return RequestRow(at: at,
+                              agent: text(raw["agent"]),
+                              session: text(raw["session"]),
+                              model: text(raw["served"]).isEmpty ? text(raw["model"]) : text(raw["served"]),
+                              input: int64("in"),
+                              output: int64("out"),
+                              cacheRead: int64("cache_read"),
+                              ms: int64("ms"),
+                              status: (raw["status"] as? NSNumber)?.intValue ?? 0,
+                              source: raw["source"] as? String,
+                              ttftMs: (raw["ttft_ms"] as? NSNumber).flatMap { $0.int64Value >= 0 ? $0.int64Value : nil },
+                              reasoning: int64("reasoning"))
+        }
+    }
+
+    /// GET /v1/magpie/usage 的当日合计（series 里 label 匹配今天）。
+    /// 返回 (input+output+cacheRead) 总量；DSH 关闭时 Touch Bar「今日」列用它兜底。
+    static func decodeUsageTodayTotal(_ data: Data, now: Date = Date()) -> Int64? {
+        guard data.count <= 1024 * 1024,
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let series = root["series"] as? [[String: Any]] else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "MMM d"
+        let label = formatter.string(from: now)
+        for day in series where (day["label"] as? String) == label {
+            func int64(_ key: String) -> Int64 {
+                (day[key] as? NSNumber).flatMap { $0.int64Value >= 0 ? $0.int64Value : nil } ?? 0
+            }
+            return int64("input") + int64("output") + int64("cache_read")
+        }
+        return nil
+    }
+}
+
+/// Magpie 只读客户端。端口发现：UserDefaults magpie.origin → GET / manifest 校验。
+/// 失败即冷却（60s），保留 lastGood（UserDefaults 持久化）；不扫凭据文件。
+/// 所有回调在主线程；并发合并；模式与 JimmyCloudPlanProvider 一致。
+final class MagpieProvider {
+    struct Snapshot: Equatable {
+        var quotas: [MagpieQuota] = []
+        var accounts: [MagpieAccount] = []
+        var readAt: Date?
+        var error: String?
+        var stale = false
+
+        func quota(_ provider: String) -> MagpieQuota? {
+            quotas.first { $0.provider == provider }
+        }
+        var isRunning: Bool { error == nil }
+    }
+
+    typealias Completion = (Snapshot) -> Void
+
+    /// 测试缝：绕过 UserDefaults 与 manifest 校验，直接指定 origin 列表。
+    static var overrideOrigin: URL?
+    private static let originKey = "magpie.origin"
+    private static let storeKey = "app.quotastrip.magpie.last.v1"
+    private static let storeDateKey = "app.quotastrip.magpie.lastAt.v1"
+    private static let defaultOrigin = URL(string: "http://127.0.0.1:3425")!
+
+    private var lastGood: Snapshot?
+    private var cachedAt: Date?
+    private var cooldownUntil: Date?
+    private var inFlight = false
+    private var completions: [Completion] = []
+    private var generation: UInt64 = 0
+    private let fetchQueue = DispatchQueue(label: "app.quotastrip.magpie", qos: .utility)
+
+    init() {
+        if let data = UserDefaults.standard.data(forKey: Self.storeKey),
+           let quotas = try? MagpieDecode.decodeQuotas(data) {
+            var snapshot = Snapshot()
+            snapshot.quotas = quotas
+            snapshot.readAt = quotas.compactMap { $0.readAt }.max()
+            snapshot.stale = true
+            lastGood = snapshot
+            cachedAt = UserDefaults.standard.object(forKey: Self.storeDateKey) as? Date
+        }
+    }
+
+    static func configuredOrigin() -> URL {
+        if let override = overrideOrigin { return override }
+        if let raw = UserDefaults.standard.string(forKey: originKey),
+           let url = URL(string: raw), url.scheme == "http", url.host == "127.0.0.1" {
+            return url
+        }
+        return defaultOrigin
+    }
+
+    func fetch(force: Bool = false, completion: @escaping Completion) {
+        precondition(Thread.isMainThread)
+        if inFlight { completions.append(completion); return }
+        let now = Date()
+        if let until = cooldownUntil, until > now {
+            completion(currentSnapshot(stale: true))
+            return
+        }
+        if !force, let at = cachedAt, lastGood != nil, now.timeIntervalSince(at) < 60 {
+            completion(currentSnapshot(stale: false))
+            return
+        }
+        completions.append(completion)
+        inFlight = true
+        let version = generation
+        let origin = Self.configuredOrigin()
+        fetchQueue.async { [weak self] in
+            guard let self else { return }
+            let outcome = Self.run(origin: origin)
+            DispatchQueue.main.async {
+                guard version == self.generation else { return }
+                self.inFlight = false
+                let callbacks = self.completions
+                self.completions.removeAll()
+                switch outcome {
+                case .ok(let quotasData, let accountsData):
+                    do {
+                        let quotas = try MagpieDecode.decodeQuotas(quotasData)
+                        var snapshot = Snapshot()
+                        snapshot.quotas = quotas
+                        // accounts 偶发失败不致命：保留上次好值，避免面板闪「0 个账号」。
+                        // 空 Data（请求失败）不覆盖上次好值。
+                        if let decoded = try? MagpieDecode.decodeAccounts(accountsData), !decoded.isEmpty {
+                            snapshot.accounts = decoded
+                        } else {
+                            snapshot.accounts = self.lastGood?.accounts ?? []
+                        }
+                        snapshot.readAt = quotas.compactMap { $0.readAt }.max() ?? Date()
+                        self.lastGood = snapshot
+                        self.cachedAt = Date()
+                        self.cooldownUntil = nil
+                        UserDefaults.standard.set(quotasData, forKey: Self.storeKey)
+                        UserDefaults.standard.set(self.cachedAt, forKey: Self.storeDateKey)
+                        callbacks.forEach { $0(snapshot) }
+                    } catch {
+                        self.fail(L("Magpie returned invalid quota data.", "Magpie 额度数据无效。"), callbacks: callbacks)
+                    }
+                case .failed(let message):
+                    self.fail(message, callbacks: callbacks)
+                }
+            }
+        }
+    }
+
+    private func currentSnapshot(stale: Bool) -> Snapshot {
+        var snapshot = lastGood ?? Snapshot()
+        if lastGood == nil {
+            snapshot.error = L("Magpie is not running.", "Magpie 未运行。")
+        }
+        snapshot.stale = stale && lastGood != nil
+        return snapshot
+    }
+
+    private func fail(_ message: String, callbacks: [Completion]) {
+        cooldownUntil = Date().addingTimeInterval(60)
+        var snapshot = lastGood ?? Snapshot()
+        snapshot.error = message
+        snapshot.stale = lastGood != nil
+        callbacks.forEach { $0(snapshot) }
+    }
+
+    private enum Outcome {
+        case ok(Data, Data)
+        case failed(String)
+    }
+
+    // MARK: 当前对话实时视图（GET /v1/magpie/usage/requests）
+
+    struct Activity: Equatable {
+        var model: String?
+        var session: String?
+        var sessionTokens: Int64?
+        var sessionCacheHit: Double?
+        var tokensPerSecond: Double?
+        var requestAt: Date?
+        /// Magpie 自己的当日 token 合计；DSH 用量不可用时的兜底。
+        var todayTotal: Int64?
+        var error: String?
+        var stale = false
+    }
+
+    private var activityGood: Activity?
+    private var activityAt: Date?
+    private var activityCooldown: Date?
+    private var activityInFlight = false
+    private var activityCompletions: [(Activity) -> Void] = []
+
+    /// 20s tick 内命中 15s 缓存；失败保留上次好值标 stale，冷却 30s。
+    func fetchActivity(force: Bool = false, completion: @escaping (Activity) -> Void) {
+        precondition(Thread.isMainThread)
+        if activityInFlight { activityCompletions.append(completion); return }
+        let now = Date()
+        if let until = activityCooldown, until > now {
+            completion(activitySnapshot(stale: true)); return
+        }
+        if !force, let at = activityAt, activityGood != nil, now.timeIntervalSince(at) < 15 {
+            completion(activitySnapshot(stale: false)); return
+        }
+        activityCompletions.append(completion)
+        activityInFlight = true
+        let origin = Self.configuredOrigin()
+        fetchQueue.async { [weak self] in
+            guard let self else { return }
+            let outcome = Self.runActivity(origin: origin)
+            DispatchQueue.main.async {
+                self.activityInFlight = false
+                let callbacks = self.activityCompletions
+                self.activityCompletions.removeAll()
+                switch outcome {
+                case .ok(let activity):
+                    self.activityGood = activity
+                    self.activityAt = Date()
+                    self.activityCooldown = nil
+                    callbacks.forEach { $0(activity) }
+                case .failed(let message):
+                    self.activityCooldown = Date().addingTimeInterval(30)
+                    var snapshot = self.activitySnapshot(stale: true)
+                    snapshot.error = message
+                    callbacks.forEach { $0(snapshot) }
+                }
+            }
+        }
+    }
+
+    private func activitySnapshot(stale: Bool) -> Activity {
+        var snapshot = activityGood ?? Activity()
+        if activityGood == nil {
+            snapshot.error = L("Magpie is not running.", "Magpie 未运行。")
+        }
+        snapshot.stale = stale && activityGood != nil
+        return snapshot
+    }
+
+    private enum ActivityOutcome {
+        case ok(Activity)
+        case failed(String)
+    }
+
+    private static func runActivity(origin: URL) -> ActivityOutcome {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 8
+        config.timeoutIntervalForResource = 10
+        config.urlCache = nil
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        let session = URLSession(configuration: config, delegate: NoRedirects(), delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        guard let manifest = get(session, origin.appendingPathComponent("")),
+              MagpieDecode.isManifest(manifest) else {
+            return .failed(L("Magpie is not running.", "Magpie 未运行。"))
+        }
+        guard let url = URL(string: "v1/magpie/usage/requests?limit=100", relativeTo: origin),
+              let data = get(session, url),
+              let rows = try? MagpieDecode.decodeRequests(data) else {
+            return .failed(L("Magpie requests failed.", "Magpie 请求记录读取失败。"))
+        }
+        var result = activity(from: rows)
+        if let usageURL = URL(string: "v1/magpie/usage", relativeTo: origin),
+           let usageData = get(session, usageURL) {
+            result.todayTotal = MagpieDecode.decodeUsageTodayTotal(usageData)
+        }
+        return .ok(result)
+    }
+
+    /// 最新一条真实对话请求（codex/dsh，排除 magpie/probe/mcp/curl 等内部流量）。
+    /// tok/s 只在最近 120s 内有计时请求时给出，避免把几分钟前的速率当“实时”。
+    static func activity(from rows: [MagpieDecode.RequestRow], now: Date = Date()) -> Activity {
+        var conversations: [MagpieDecode.RequestRow] = []
+        for row in rows where (row.agent == "codex" || row.agent == "dsh") && !row.session.isEmpty {
+            conversations.append(row)
+        }
+        conversations.sort { $0.at > $1.at }
+        var activity = Activity()
+        guard let latest = conversations.first else { return activity }
+        activity.model = latest.model.isEmpty ? nil : latest.model
+        activity.session = latest.session
+        activity.sessionTokens = latest.totalTokens
+        activity.sessionCacheHit = latest.cacheHitPercent
+        activity.requestAt = latest.at
+        for row in conversations {
+            guard row.hasTiming, row.status == 200, row.output > 0 else { continue }
+            if now.timeIntervalSince(row.at) <= 120 {
+                activity.tokensPerSecond = row.tokensPerSecond
+            }
+            break
+        }
+        return activity
+    }
+
+    /// fetchQueue 上同步执行：manifest 校验 → quotas → accounts（accounts 失败不致命）。
+    private static func run(origin: URL) -> Outcome {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForResource = 20
+        config.urlCache = nil
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        let session = URLSession(configuration: config, delegate: NoRedirects(), delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        guard let manifest = get(session, origin.appendingPathComponent("")),
+              MagpieDecode.isManifest(manifest) else {
+            return .failed(L("Magpie is not running.", "Magpie 未运行。"))
+        }
+        guard let quotas = get(session, origin.appendingPathComponent("v1/magpie/quotas")) else {
+            return .failed(L("Magpie quotas request failed.", "Magpie 额度请求失败。"))
+        }
+        let accounts = get(session, origin.appendingPathComponent("v1/magpie/accounts")) ?? Data()
+        return .ok(quotas, accounts)
+    }
+
+    private static func get(_ session: URLSession, _ url: URL) -> Data? {
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 15
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: Data?
+        let task = session.dataTask(with: request) { data, response, _ in
+            defer { semaphore.signal() }
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                  let data, !data.isEmpty else { return }
+            result = data
+        }
+        task.resume()
+        _ = semaphore.wait(timeout: .now() + 20)
+        return result
+    }
+
+    /// 拒重定向：loopback 只读接口不应把请求带去别处。
+    private final class NoRedirects: NSObject, URLSessionTaskDelegate {
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest,
+                        completionHandler: @escaping (URLRequest?) -> Void) {
+            completionHandler(nil)
+        }
+    }
+}
