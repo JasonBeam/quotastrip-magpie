@@ -101,6 +101,7 @@ def swift_checks() -> bool:
 def source_checks() -> bool:
     panel = (SOURCES / "UsagePanel.swift").read_text(encoding="utf-8")
     main = (SOURCES / "main.swift").read_text(encoding="utf-8")
+    magpie = (SOURCES / "MagpieProvider.swift").read_text(encoding="utf-8")
     failures = []
 
     def check(condition: bool, label: str) -> None:
@@ -198,6 +199,9 @@ def source_checks() -> bool:
           "Magpie Qwen provider card exists and hides without data")
     check("magpieKimiCard" in panel and "if model.snapshot.magpieKimiToday != nil" in panel,
           "Magpie Kimi Code provider card exists and hides without data")
+    check("kimiQuotaCard" in panel and "kimiQuotaRows" in panel
+          and 'snapshot.quota("kimi")' in main,
+          "Kimi Code quota card reads Magpie quotas and shows real remaining windows")
     check("Token 消耗" not in panel and "估算成本" not in panel and "主力模型" not in panel,
           "Qwen Magpie card keeps only the share bar + model rows (user removed duplicate pairs)")
     check("heatmapCard" in panel and "magpieHeatDays" in panel
@@ -213,6 +217,9 @@ def source_checks() -> bool:
     tooltip = panel.split("private static func heatTooltipLines", 1)[1].split("private static func heatTokensText", 1)[0]
     check("个请求" not in tooltip and "day.cost" not in tooltip and "fxRate" not in tooltip,
           "heat hover omits request count and cost as requested")
+    check("stableHeatDays(previous: previousHeat" in magpie
+          and "guard candidate.count >= previous.count else { return previous }" in magpie,
+          "short or empty Magpie cache rewrites cannot collapse the panel heat history")
 
     return not failures
 

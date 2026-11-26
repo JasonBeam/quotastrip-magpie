@@ -319,6 +319,21 @@ struct MagpieTests {
                "no cache → series-only week fallback")
         expect(MagpieDecode.mergeHeatmap(cached: nil, series: nil, now: day) == nil, "no data → nil")
 
+        // Magpie 重写缓存时的短读数/空读数不能把完整历史缩没；正常增长仍接受。
+        let previousHeat = full
+        let shortHeat = Array(full.suffix(4))
+        expect(MagpieDecode.stableHeatDays(previous: previousHeat, candidate: shortHeat) == previousHeat,
+               "short cache rewrite keeps previous full heat history")
+        expect(MagpieDecode.stableHeatDays(previous: previousHeat, candidate: nil) == previousHeat,
+               "empty cache rewrite keeps previous full heat history")
+        let erasedDay = full.map { $0.label == "2026-11-20"
+            ? MagpieDecode.HeatDay(label: $0.label, tokens: 0, calls: 0, cost: nil) : $0 }
+        expect(MagpieDecode.stableHeatDays(previous: previousHeat, candidate: erasedDay) == previousHeat,
+               "transient zero does not erase an already active historical day")
+        let nextDay = full + [MagpieDecode.HeatDay(label: "2026-11-27", tokens: 5000, calls: 50, cost: 5)]
+        expect(MagpieDecode.stableHeatDays(previous: previousHeat, candidate: nextDay) == nextDay,
+               "normal next-day history growth accepted")
+
         // 今日会话数：去重 id；period 非 today 拒收。
         let sessionsToday = """
         {"period":"today","sessions":[{"id":"a","agent":"codex"},{"id":"b","agent":"dsh"},{"id":"a","agent":"codex"}]}

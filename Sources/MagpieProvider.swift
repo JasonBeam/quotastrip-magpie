@@ -351,6 +351,25 @@ enum MagpieDecode {
         return out
     }
 
+    /// Magpie 重建 heat-v1.json 时可能短暂写到空文件或只写一部分。候选历史变短、
+    /// 消失时沿用上一份完整快照；范围相同的新快照若把旧活跃日写成 0，也保留旧值。
+    /// 新的一天正常扩展仍接受，实时 series 会继续覆盖 cut 后的数据。
+    static func stableHeatDays(previous: [HeatDay], candidate: [HeatDay]?) -> [HeatDay] {
+        guard let candidate, !candidate.isEmpty else { return previous }
+        guard !previous.isEmpty else { return candidate }
+        guard candidate.count >= previous.count else { return previous }
+        guard candidate.first?.label == previous.first?.label else { return candidate }
+        let old = Dictionary(uniqueKeysWithValues: previous.map { ($0.label, $0) })
+        return candidate.map { day in
+            if day.tokens == 0, day.calls == 0,
+               let prior = old[day.label], prior.tokens > 0 {
+                return HeatDay(label: day.label, tokens: prior.tokens,
+                               calls: prior.calls, cost: day.cost ?? prior.cost)
+            }
+            return day
+        }
+    }
+
     /// 30d 合并 series → HeatDay 序列（补 calls/cost，tooltip 用）。
     static func decodeUsageHeatDays(_ data: Data) -> [HeatDay]? {
         guard data.count <= 4 * 1024 * 1024,
@@ -691,9 +710,10 @@ final class MagpieProvider {
         activityCompletions.append(completion)
         activityInFlight = true
         let origin = Self.configuredOrigin()
+        let previousHeat = activityGood?.heatDays ?? []
         fetchQueue.async { [weak self] in
             guard let self else { return }
-            let outcome = Self.runActivity(origin: origin)
+            let outcome = Self.runActivity(origin: origin, previousHeat: previousHeat)
             DispatchQueue.main.async {
                 self.activityInFlight = false
                 let callbacks = self.activityCompletions
@@ -728,7 +748,7 @@ final class MagpieProvider {
         case failed(String)
     }
 
-    private static func runActivity(origin: URL) -> ActivityOutcome {
+    private static func runActivity(origin: URL, previousHeat: [MagpieDecode.HeatDay]) -> ActivityOutcome {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 8
         config.timeoutIntervalForResource = 10
@@ -775,6 +795,9 @@ final class MagpieProvider {
         if let heat = MagpieDecode.mergeHeatmap(cached: cached, series: recent) {
             result.heatDays = heat
         }
+        // 同一份 30d series 作为最近一次好值传入，重建中的短缓存不会把面板缩回 30 天。
+        // activityGood 是上一轮完整结果；本轮实时值已合并进 candidate。
+        result.heatDays = MagpieDecode.stableHeatDays(previous: previousHeat, candidate: result.heatDays)
         let fxURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".cache/magpie/fxrate.json")
         if let fxData = try? Data(contentsOf: fxURL) {

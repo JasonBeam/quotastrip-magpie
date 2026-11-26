@@ -1434,6 +1434,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate, NS
         // Magpie 面板扩展：千问供应商今日消耗 / 近 30 天热力图 / 今日会话数 / 最近请求时刻。
         snapshot.magpieQwenToday = magpieActivity.qwenToday
         snapshot.magpieKimiToday = magpieActivity.kimiToday
+        snapshot.kimiQuotaRows = Self.kimiQuotaRows(magpieSnapshot)
+        snapshot.kimiQuotaStale = magpieSnapshot.stale
         snapshot.magpieHeatDays = magpieActivity.heatDays
         snapshot.magpieFxRate = magpieActivity.fxRate
         snapshot.magpieTodaySessions = magpieActivity.todaySessions
@@ -1485,6 +1487,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate, NS
             guard let remaining = window.remaining else { return window.name }
             return "\(window.name) \(Int(remaining.rounded()))%"
         }.joined(separator: " · ")
+    }
+
+    /// Kimi 官方额度已经由 Magpie quotas 正规读取；面板直接显示剩余，不从消耗反推。
+    private static func kimiQuotaRows(_ snapshot: MagpieProvider.Snapshot) -> [UsageQuotaRow] {
+        guard snapshot.isRunning, let kimi = snapshot.quota("kimi"), kimi.isUsable else { return [] }
+        return [("5h", "5 hours", TimeInterval(5 * 3600)),
+                ("7d", "7 days", TimeInterval(7 * 86400))].compactMap { item in
+            guard let window = kimi.window(named: item.1), window.display == nil,
+                  let remaining = window.remaining, remaining.isFinite else { return nil }
+            return UsageQuotaRow(label: item.0,
+                                 remainingPercent: Int(min(100, max(0, remaining)).rounded()),
+                                 resetText: "",
+                                 resetAt: window.resetsAt,
+                                 windowSeconds: item.2)
+        }
     }
 
     private func quotaRow(label: String, window: QuotaWindow, clockStyle: Bool,

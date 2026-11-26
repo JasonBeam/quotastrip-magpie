@@ -93,6 +93,9 @@ struct UsageSnapshot: Equatable {
     var magpieQwenToday: MagpieDecode.QwenUsage?
     /// Magpie Kimi Code 供应商今日消耗（by.provider.kimi）；nil 时该卡隐藏。
     var magpieKimiToday: MagpieDecode.QwenUsage?
+    /// Magpie Kimi Code 的真实 5h/7d 剩余额度；与今日 token 消耗分开显示。
+    var kimiQuotaRows: [UsageQuotaRow] = []
+    var kimiQuotaStale = false
     /// 整段按日明细（Magpie App 热力图同窗口，旧→新）；nil/全 0 时热力图卡隐藏。
     var magpieHeatDays: [MagpieDecode.HeatDay] = []
     /// App 同款 USD→CNY 汇率；nil 时 tooltip 显示 US$。
@@ -411,6 +414,9 @@ struct UsagePanelView: View {
             // 千问 Token Plan：没有数据时整卡不出现，不留空卡。
             if model.snapshot.qwenPlan != nil {
                 qwenPlanCard
+            }
+            if !model.snapshot.kimiQuotaRows.isEmpty {
+                kimiQuotaCard
             }
             // Magpie 千问供应商消耗（今日，provider=qwen）：跟在 Token Plan 卡下面。
             if model.snapshot.magpieQwenToday != nil {
@@ -888,6 +894,19 @@ struct UsagePanelView: View {
     }
 
     // MARK: Magpie 千问供应商卡（今日消耗 + 按模型；跟在 Token Plan 卡下方）
+
+    private var kimiQuotaCard: some View {
+        card {
+            VStack(alignment: .leading, spacing: 0) {
+                head(title: "Kimi Code",
+                     aside: L("Remaining", "剩余额度"),
+                     icon: "magpie-logo")
+                Spacer().frame(height: PanelStyle.blockGap)
+                windows(model.snapshot.kimiQuotaRows, brand: .ai)
+                    .opacity(model.snapshot.kimiQuotaStale ? 0.45 : 1)
+            }
+        }
+    }
 
     private var magpieQwenCard: some View {
         magpieProviderCard(title: L("Qwen via Magpie", "千问 · Magpie"),
