@@ -72,6 +72,28 @@ expect(emptySnapshot.deepSeekSpentText == nil, "spent defaults to nil until real
 expect(emptySnapshot.qwenPlan == nil, "qwen plan defaults to nil so the card stays hidden")
 expect(emptySnapshot.qwenPlanStale == false, "qwen plan stale defaults to false")
 
+// Tooltip 以日期格为锚点：正上方 10pt、左右夹边、顶部不足转下方。
+let bounds = CGSize(width: 444, height: 180)
+let bubble = CGSize(width: 150, height: 48)
+let centerCell = CGRect(x: 180, y: 80, width: 10, height: 10)
+let centerTip = UsagePanelView.HeatmapCard<EmptyView>.tooltipPlacement(
+    cell: centerCell, bubble: bubble, bounds: bounds)
+expect(centerTip.x == 185 && centerTip.y == 46, "heat tooltip centers 10pt above its date cell")
+let leftTip = UsagePanelView.HeatmapCard<EmptyView>.tooltipPlacement(
+    cell: CGRect(x: 0, y: 80, width: 10, height: 10), bubble: bubble, bounds: bounds)
+expect(leftTip.x == 83 && leftTip.y == 46, "heat tooltip clamps at the left safe edge")
+let rightTip = UsagePanelView.HeatmapCard<EmptyView>.tooltipPlacement(
+    cell: CGRect(x: 434, y: 80, width: 10, height: 10), bubble: bubble, bounds: bounds)
+expect(rightTip.x == 361 && rightTip.y == 46, "heat tooltip clamps at the right safe edge")
+let topTip = UsagePanelView.HeatmapCard<EmptyView>.tooltipPlacement(
+    cell: CGRect(x: 180, y: 4, width: 10, height: 10), bubble: bubble, bounds: bounds)
+expect(topTip.y == 48 && topTip.y - bubble.height / 2 == 24,
+       "heat tooltip flips 10pt below when there is no room above")
+let unmeasuredTip = UsagePanelView.HeatmapCard<EmptyView>.tooltipPlacement(
+    cell: centerCell, bubble: bubble, bounds: .zero)
+expect(unmeasuredTip.x == 185 && unmeasuredTip.y == 46,
+       "unreported card width falls back to the fixed heatmap content width")
+
 exit(failures == 0 ? 0 : 1)
 '''
 
@@ -214,6 +236,19 @@ def source_checks() -> bool:
     check("HeatTrackingView" in panel and "HeatTooltipBubble" in panel
           and "heatTooltipLines" in panel and "heatTokensText" in panel,
           "heat cells use the custom hover bubble with date+weekday and daily tokens")
+    check("proxy.frame(in: .named(HeatmapCard<EmptyView>.coordinateSpace))" in panel
+          and ".position(x: placement.x, y: placement.y)" in panel
+          and "let gap: CGFloat = 10" in panel,
+          "heat tooltip follows each date cell with a 10pt gap")
+    check("boundsWidth - margin - width / 2" in panel
+          and "boundsWidth = bounds.width > 0 ? bounds.width : PanelStyle.fullInner" in panel
+          and "cell.maxY + gap + height / 2" in panel,
+          "heat tooltip clamps horizontally and flips below near the top edge")
+    check("withAnimation(.easeOut(duration: 0.14)) { hovered = nil }" in panel,
+          "heat tooltip fades only when hover leaves the cells")
+    check("hover.set(day, entered ? frame : nil)" in panel
+          and "hovered?.day == day" in panel,
+          "a stale exit from the previous cell cannot hide the new cell tooltip")
     tooltip = panel.split("private static func heatTooltipLines", 1)[1].split("private static func heatTokensText", 1)[0]
     check("个请求" not in tooltip and "day.cost" not in tooltip and "fxRate" not in tooltip,
           "heat hover omits request count and cost as requested")

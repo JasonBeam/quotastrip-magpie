@@ -992,7 +992,10 @@ struct UsagePanelView: View {
                                         RoundedRectangle(cornerRadius: 2.5, style: .continuous)
                                             .fill(heatColor(value: item.tokens, peak: peak))
                                             .frame(width: cell, height: cell)
-                                            .background(HeatCellHover(day: item))
+                                            .background(GeometryReader { proxy in
+                                                HeatCellHover(day: item,
+                                                              frame: proxy.frame(in: .named(HeatmapCard<EmptyView>.coordinateSpace)))
+                                            })
                                     } else {
                                         Color.clear.frame(width: cell, height: cell)
                                     }
@@ -1010,26 +1013,26 @@ struct UsagePanelView: View {
     }
 
     struct HeatHover {
-        var get: () -> MagpieDecode.HeatDay?
-        var set: (MagpieDecode.HeatDay?) -> Void
+        var set: (MagpieDecode.HeatDay?, CGRect?) -> Void
     }
 
     struct HeatHoverKey: EnvironmentKey {
-        static let defaultValue = HeatHover(get: { nil }, set: { _ in })
+        static let defaultValue = HeatHover(set: { _, _ in })
     }
 
     private struct HeatCellHover: NSViewRepresentable {
         let day: MagpieDecode.HeatDay
+        let frame: CGRect
         @Environment(\.heatHover) private var hover
 
         func makeNSView(context: Context) -> HeatTrackingView {
             let view = HeatTrackingView()
-            view.onHover = { entered in hover.set(entered ? day : nil) }
+            view.onHover = { entered in hover.set(day, entered ? frame : nil) }
             return view
         }
 
         func updateNSView(_ view: HeatTrackingView, context: Context) {
-            view.onHover = { entered in hover.set(entered ? day : nil) }
+            view.onHover = { entered in hover.set(day, entered ? frame : nil) }
         }
     }
 
@@ -1038,8 +1041,9 @@ struct UsagePanelView: View {
         private var tracking: NSTrackingArea?
 
         override func hitTest(_ point: NSPoint) -> NSView? {
-            // 仅监听悬停，不能吃掉面板的滚动和点击。
-            nil
+            // 命中严格限制在这个日期格内；nil 会让部分 macOS 版本连
+            // mouseEntered/Exited 都不投递，导致跟踪区域形同虚设。
+            bounds.contains(point) ? self : nil
         }
 
         override func updateTrackingAreas() {
@@ -1052,33 +1056,93 @@ struct UsagePanelView: View {
             tracking = area
         }
 
-        override func mouseEntered(with event: NSEvent) { onHover?(true) }
-        override func mouseExited(with event: NSEvent) { onHover?(false) }
+        override func mouseEntered(with event: NSEvent) {
+            onHover?(true)
+        }
+        override func mouseExited(with event: NSEvent) {
+            onHover?(false)
+        }
     }
 
     /// 系统 .help 在这个非激活玻璃面板里收不到 hover，改由 AppKit tracking area
     /// 直接上报格子坐标；浮层画在面板内部，不额外开窗口。
-    private struct HeatmapCard<Content: View>: View {
+    struct HeatmapCard<Content: View>: View {
+        static var coordinateSpace: String { "quotastrip.heat-tooltip-area" }
+
         let days: [MagpieDecode.HeatDay]
         let skin: PanelSkin
         @ViewBuilder let content: ([MagpieDecode.HeatDay], PanelSkin) -> Content
-        @State private var hovered: MagpieDecode.HeatDay?
+        @State private var hovered: (day: MagpieDecode.HeatDay, frame: CGRect)?
+        @State private var bubbleSize: CGSize = .zero
+        @State private var cardSize: CGSize = .zero
 
         var body: some View {
-            ZStack(alignment: .top) {
+            ZStack(alignment: .topLeading) {
                 content(days, skin)
-                if let day = hovered {
-                    HeatTooltipBubble(day: day)
-                        .padding(.top, PanelStyle.head + 8)
+                if let hovered {
+                    let placement = Self.tooltipPlacement(cell: hovered.frame,
+                                                          bubble: bubbleSize,
+                                                          bounds: cardSize)
+                    HeatTooltipBubble(day: hovered.day)
+                        .background(GeometryReader { bubble in
+                            Color.clear.preference(key: HeatTooltipSizeKey.self,
+                                                   value: bubble.size)
+                        })
+                        .position(x: placement.x, y: placement.y)
+                        .opacity(bubbleSize == .zero ? 0 : 1)
                         .transition(.opacity)
                         .allowsHitTesting(false)
                 }
             }
-            .environment(\.heatHover, HeatHover(get: { hovered }, set: { day in
-                guard day != hovered else { return }
-                withAnimation(.easeInOut(duration: 0.08)) { hovered = day }
+            .coordinateSpace(name: Self.coordinateSpace)
+            .background(GeometryReader { proxy in
+                Color.clear.preference(key: HeatCardSizeKey.self, value: proxy.size)
+            })
+            .onPreferenceChange(HeatCardSizeKey.self) { cardSize = $0 }
+            .onPreferenceChange(HeatTooltipSizeKey.self) { bubbleSize = $0 }
+            .environment(\.heatHover, HeatHover(set: { day, frame in
+                if let day, let frame {
+                    // 格子之间切换只更新同一浮层，不先清空再插入，避免闪烁。
+                    hovered = (day, frame)
+                } else if let day, hovered?.day == day {
+                    // macOS 可能先投递新格 entered、再投递旧格 exited；
+                    // 旧格的退出不能清掉刚显示的新格提示。
+                    withAnimation(.easeOut(duration: 0.14)) { hovered = nil }
+                }
             }))
         }
+
+        /// 优先放在方块正上方 10pt；左右夹在安全边距内，顶部不足时移到方块下方。
+        static func tooltipPlacement(cell: CGRect, bubble: CGSize, bounds: CGSize) -> CGPoint {
+            let margin: CGFloat = 8
+            let gap: CGFloat = 10
+            let width = max(1, bubble.width)
+            let height = max(1, bubble.height)
+            // SwiftUI 的背景 Preference 偶尔不会上报；此时沿用热力卡固定内容宽，
+            // 不能让零宽度把左右 clamp 错算成固定左上角。
+            let boundsWidth = bounds.width > 0 ? bounds.width : PanelStyle.fullInner
+            let x = min(max(cell.midX, margin + width / 2),
+                        max(margin + width / 2, boundsWidth - margin - width / 2))
+            let above = cell.minY - gap - height / 2
+            let y: CGFloat
+            if above - height / 2 >= margin {
+                y = above
+            } else {
+                let below = cell.maxY + gap + height / 2
+                y = min(below, max(margin + height / 2, bounds.height - margin - height / 2))
+            }
+            return CGPoint(x: x, y: y)
+        }
+    }
+
+    private struct HeatTooltipSizeKey: PreferenceKey {
+        static var defaultValue: CGSize = .zero
+        static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
+    }
+
+    private struct HeatCardSizeKey: PreferenceKey {
+        static var defaultValue: CGSize = .zero
+        static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
     }
 
     private struct HeatTooltipBubble: View {
