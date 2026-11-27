@@ -1,153 +1,113 @@
 # QuotaStrip
 
-> **Local version: Codex + DeepSeek.** This checkout displays Codex remaining quota and DeepSeek API balance. See the [setup guide](docs/deepseek.zh-CN.md). The upstream Claude instructions and screenshots below describe the older version.
-
-**See your Claude Code and Codex usage quota right on the MacBook Pro Touch Bar.**
-
 [简体中文](README.zh-CN.md)
 
-That old Touch Bar nobody uses? QuotaStrip turns it into a live dashboard for your AI coding
-agents. No more guessing how much quota you have left or getting surprised by a rate limit
-mid-task — it's always there, one glance away.
+QuotaStrip turns the MacBook Pro Touch Bar into a compact dashboard for Codex and
+AI token usage. It is a personal, local-first fork of
+[hohocf/QuotaStrip](https://github.com/hohocf/QuotaStrip), focused on the Codex
+desktop app and a local [Magpie](https://github.com/yetone/magpie) gateway.
 
-![QuotaStrip on the Touch Bar](docs/screenshot.png)
+![QuotaStrip on the Touch Bar](docs/touchbar-magpie.png)
 
-Each service gets its own panel: a brand logo, plus two rows — your **5-hour window** and your
-**weekly quota** — each with a progress bar, the exact percentage, and when it resets.
+The Touch Bar shows:
 
----
+- Codex 5-hour and 7-day **remaining** quota.
+- Token Plan remaining percentage, today's token count, active model, cache-hit
+  rate, and output speed.
+- Optional Kimi Code quota rows when Magpie exposes a valid quota bucket.
+- The system Control Strip on the right.
 
-## Features
+The menu-bar panel adds the detailed usage view: DeepSeek balance, Token Plan
+credits, Magpie provider/model breakdowns, Kimi Code quota, and a complete Magpie
+usage heatmap. Hovering a heatmap cell shows its local date, weekday, and token
+count.
 
-**Two services, two windows, at a glance**
-- Claude and Codex side by side, each showing the **5-hour** and **7-day** windows.
-- Progress bar + **bold right-aligned percentage** + reset time on every row.
-- Brand logos so you can tell them apart instantly.
+## Before installing
 
-**Color coding that warns you early**
-- Bars and percentages go **green → yellow (≥50%) → red (≥80%)** as you burn through quota.
+- A MacBook Pro with a physical Touch Bar.
+- macOS 11 or later. Start-at-login requires macOS 13 or later.
+- The ChatGPT/Codex desktop app at `/Applications/ChatGPT.app` for live Codex
+  quota. Older fallbacks also read `~/.codex/sessions`.
+- Magpie is optional. Without it, QuotaStrip falls back to Codex app-server or
+  local session logs and the Magpie-specific rows stay unavailable.
 
-**Reset times done right**
-- The 5h row shows the **reset clock time** (24-hour, no am/pm).
-- The 7d row shows **time remaining** (e.g. `2d9h`) so you know how long you've got.
-- When the 5h window is **under 30 minutes from resetting**, its time turns **yellow** — a nudge
-  to spend the rest of the window before it refills.
-
-**"It's waiting for you" reminder** 🔴
-- When Claude or Codex stops and **waits for your input or a permission confirmation**, a red `!`
-  badge appears on its logo (and in the menu bar). You'll know to go respond instead of leaving it
-  hanging.
-- Detection is **two-layer**: a zero-config heuristic that reads session logs (works out of the
-  box, even for sessions already running) plus optional hooks for instant precision.
-- The badge clears the moment you reply, or when you tap the panel.
-
-**Tap to jump in**
-- Tap a panel to **bring the matching desktop app to the front** (Claude.app / Codex.app). Not
-  installed? It opens the usage webpage instead.
-
-**Honest about rate limits**
-- Anthropic's usage endpoint is rate-limited. When it returns 429, QuotaStrip shows the last known
-  numbers with a small **yellow dot**, and strictly honors the server's `Retry-After` before trying
-  again. A window whose reset time has passed is shown as 0% so you're never misled by stale highs.
-- A **connection log** (menu → *View connection log*) records every real request: `ok`, `429`, or
-  network errors. Cache hits aren't logged.
-
-**Stays out of your way**
-- Keeps the system **Control Strip** on the right and an **esc** key on the left.
-- Restores itself when your Mac wakes from sleep.
-- Menu-bar gauge icon with: *Refresh now* (forced), *Re-show Touch Bar*, open usage pages,
-  *View connection log*, *Start at login*, *Quit*.
-
----
+The app uses the private `DFRFoundation` Touch Bar API, the same technique used by
+MTMR and Pock. It is not distributed through the Mac App Store and is not
+notarized.
 
 ## Install
 
-### Option A — Download (recommended)
+1. Download `QuotaStrip.zip` and `SHA256SUMS.txt` from
+   [Releases](https://github.com/JasonBeam/quotastrip-magpie/releases).
+2. Verify the archive:
 
-1. Grab `QuotaStrip.zip` from the [Releases](../../releases) page and unzip it.
-2. Drag **QuotaStrip.app** into your **Applications** folder.
-3. **First launch:** right-click the app → **Open** (this is needed once because the app isn't
-   notarized — see [Why the warning?](#why-the-gatekeeper-warning) below).
-4. When prompted, enable QuotaStrip under **System Settings → Privacy & Security → Accessibility**
-   (only needed for the **esc** key — quota display works without it).
-5. *(Optional)* Run `./install-hooks.sh` to enable the Codex "waiting for you" reminder.
+   ```bash
+   shasum -a 256 QuotaStrip.zip
+   ```
 
-That's it — the panels appear on your Touch Bar.
+3. Unzip it and move `QuotaStrip.app` to `/Applications`.
+4. Quit any older QuotaStrip process, then open the app once with
+   **Control-click → Open** to accept the unnotarized developer signature.
+5. Open the menu-bar QuotaStrip icon and choose **重新显示 Touch Bar** if the
+   Touch Bar is managed by another app.
 
-### Option B — Build from source
+No Accessibility permission, Claude hooks, Codex configuration change, or
+LaunchAgent is required. QuotaStrip itself may optionally be enabled as a login
+item from its menu.
 
-Requires Xcode command-line tools (`xcode-select --install`).
+## Building from source
 
 ```bash
-git clone https://github.com/hohocf/QuotaStrip.git
-cd QuotaStrip
-./build.sh --run
+git clone https://github.com/JasonBeam/quotastrip-magpie.git
+cd quotastrip-magpie
+./build.sh
 ```
 
-`build.sh` compiles a **universal binary** (Intel + Apple Silicon), bundles everything, and
-ad-hoc signs the app.
+The build requires Xcode and its command-line tools. It creates a universal
+Intel/Apple Silicon app at `/tmp/QuotaStrip.app`.
 
----
+## Data sources
 
-## How it works
+- **Codex quota:** Magpie's local read-only API first; app-server
+  `account/rateLimits/read` and `~/.codex/sessions` are fallbacks. Only the
+  `codex` limit bucket is used.
+- **Magpie usage:** local Magpie endpoints and its read-only cache/history files.
+- **DeepSeek:** optional official API balance lookup after the user explicitly
+  stores a key in macOS Keychain.
 
-QuotaStrip lives in the Touch Bar via the same private `DFRFoundation` API that
-[MTMR](https://github.com/Toxblh/MTMR) and [Pock](https://github.com/pigigaldi/Pock) use. A small
-bundled Python script (`quota.py`) provides the data:
+The UI refreshes every 20 seconds. Requests are serialized and cached to avoid
+overlapping refreshes. Missing or incomplete values are shown as unavailable;
+QuotaStrip never treats an unknown percentage as 100%.
 
-- **Claude** — uses your **existing Claude Code login** (OAuth token from the macOS keychain) to
-  call Anthropic's official **read-only** usage endpoint. Cached ~10 minutes; never polled
-  aggressively.
-- **Codex** — parsed **100% locally** from `~/.codex/sessions` logs. **Zero network requests.**
+## Behaviour
 
-The app refreshes every 20 seconds. Codex and the waiting-reminder are real-time; Claude's numbers
-come from the ~10-minute cache (force a live fetch any time via menu → *Refresh now*).
+- Codex/ChatGPT launch shows the Touch Bar; complete exit hides it.
+- Wake from sleep rechecks whether ChatGPT/Codex is running.
+- The menu-bar process stays available when the Touch Bar is hidden.
+- Codex percentages show remaining quota, not consumed quota.
+- Remaining values above 50% are green, 21–50% are yellow, and 20% or less are
+  red.
 
----
+## Limitations
 
-## Compatibility
+- The Touch Bar API is private and can change with macOS.
+- Release builds are signed but not notarized, so first launch requires an
+  explicit open action.
+- Magpie-specific cards require Magpie and its local service to be available.
+- Quota values depend on data exposed by Codex, Magpie, and each provider. A
+  provider changing its endpoint can temporarily leave a row unavailable.
+- The release is verified locally on the maintainer's Touch Bar Mac. Downloaders
+  still need to confirm their own physical Touch Bar layout and provider data.
 
-- Any **Touch Bar MacBook Pro** — Intel (2016–2020) and the Apple Silicon 13" (M1 2020 / M2 2022).
-  The release is a universal binary, native on both.
-- macOS 11+ for the app itself. **Start at login** needs macOS 13+ (everything else works below it).
+## Privacy
 
----
+QuotaStrip reads local Codex session data and Magpie's local-only interfaces. It
+does not modify `~/.codex/config.toml`, inject memories, install hooks, or send
+conversation bodies anywhere. Optional provider keys are stored only in macOS
+Keychain and are not included in this repository or release archive.
 
-## Privacy & "will this get my account banned?"
+## Credits and license
 
-Short answer: **very low risk.** QuotaStrip is deliberately polite:
-
-- **Read-only.** It only *queries* your usage — the same endpoint Claude Code itself uses for
-  `/usage`. It never makes inference requests, never impersonates a client, never bypasses anything.
-- **Local-first.** Codex data never leaves your machine. Your Claude token never leaves your machine.
-- **Respects rate limits.** On 429 it backs off exactly as the server asks (`Retry-After`).
-
-This is the same category of tool as other community usage widgets. The realistic risks are that
-Anthropic's *unofficial* usage endpoint could change one day (the worst case is the panel shows
-"no data" until updated), not anything account-level. If you want to be extra conservative, raise
-`CLAUDE_CACHE_TTL` in `quota.py`.
-
----
-
-## Why the Gatekeeper warning?
-
-This is a free, open-source project without a paid Apple Developer account ($99/yr), so the app is
-**ad-hoc signed**, not notarized. macOS will warn on first open. Either:
-
-- **Right-click → Open** once (then it's trusted), or
-- Remove the quarantine flag:
-  ```bash
-  xattr -dr com.apple.quarantine /Applications/QuotaStrip.app
-  ```
-
-This is standard for indie open-source Mac tools (MTMR, Pock, etc.). The source is right here —
-read it, or build it yourself.
-
----
-
-## License
-
-[MIT](LICENSE) © hohocf
-
-Logos for Claude and Codex belong to Anthropic and OpenAI respectively and are used only to
-identify each service.
+Based on [hohocf/QuotaStrip](https://github.com/hohocf/QuotaStrip), licensed under
+the MIT License. Product names and logos belong to their respective owners and
+are used only to identify the data source.

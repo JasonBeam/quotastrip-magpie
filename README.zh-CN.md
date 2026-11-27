@@ -1,143 +1,96 @@
 # QuotaStrip
 
-> **当前本地版本：Codex + Magpie 实时模块（+ 可选 DeepSeek）。**
-> Codex 剩余额度（5h/7d）优先读 Magpie 本机只读接口，失败回退 app-server / session 日志；
-> 第二模块用 Magpie logo 显示 TokenPlan 剩余%（一位小数、无进度条）、今日 token、
-> 当前对话模型 / 缓存命中率 / tok/s（DSH 解码口径）；DeepSeek 紧凑模块默认隐藏、状态菜单可开。
-> DSH 余额/用量服务保留作数据源与兜底。请先阅读[配置说明](docs/deepseek.zh-CN.md)。下方上游 Claude 文案和截图属于旧版本。
-
-**在 MacBook Pro 的 Touch Bar 上实时显示 Claude Code 和 Codex 的额度。**
-
 [English](README.md)
 
-那条几乎没人用的 Touch Bar？QuotaStrip 把它变成 AI 编程助手的实时仪表盘。再也不用猜还剩多少额度，
-也不会在干活干到一半时被限流打个措手不及——它一直在那儿，扫一眼就知道。
+QuotaStrip 把 MacBook Pro 的 Touch Bar 变成 Codex 和 AI 用量的小型实时仪表盘。
+这是一个面向 Codex 桌面端和本地 [Magpie](https://github.com/yetone/magpie) 网关的个人分支，
+基于 [hohocf/QuotaStrip](https://github.com/hohocf/QuotaStrip) 继续开发。
 
-![QuotaStrip 显示在 Touch Bar 上](docs/screenshot.png)
+![QuotaStrip 显示在 Touch Bar 上](docs/touchbar-magpie.png)
 
-每个服务一个面板：品牌 logo + 上下两行——**5 小时窗口**和**周配额**——每行都有进度条、精确百分比和重置时间。
+Touch Bar 上显示：
 
----
+- Codex 的 5 小时、7 天**剩余额度**。
+- Token Plan 剩余百分比、今日 Token、当前模型、缓存命中率和输出速度。
+- Magpie 能提供有效额度桶时，显示可选的 Kimi Code 余额行。
+- 右侧系统 Control Strip。
 
-## 功能
+菜单栏面板提供更完整的统计：DeepSeek 余额、Token Plan Credits、Magpie 各供应商和模型消耗、
+Kimi Code 额度，以及完整的 Magpie 用量热力图。鼠标扫过热力图日期方块时，会在方块附近显示
+当天日期、星期和 Token 数量。
 
-**两个服务、两个窗口，一眼看全**
-- Claude 和 Codex 并排显示，各含 **5 小时**和 **7 天**两个窗口。
-- 每行 = 进度条 + **右对齐加粗百分比** + 重置时间。
-- 品牌 logo 快速区分两个服务。
+## 安装前
 
-**会提前预警的颜色分级**
-- 进度条和百分比随用量 **绿 → 黄（≥50%）→ 红（≥80%）** 变化。
+- 一台带物理 Touch Bar 的 MacBook Pro。
+- macOS 11 或更高版本；开机自启需要 macOS 13 或更高版本。
+- 实时 Codex 额度需要位于 `/Applications/ChatGPT.app` 的 ChatGPT/Codex 桌面端；
+  读取失败时还会回退到 Codex app-server 和 `~/.codex/sessions`。
+- Magpie 为可选依赖。未运行 Magpie 时，Codex 仍有回退数据源，Magpie 专属卡片会显示暂无数据。
 
-**重置时间显示得恰到好处**
-- 5h 行显示**重置时间点**（24 小时制，无 am/pm）。
-- 7d 行显示**剩余时长**（如 `2d9h`），一眼知道还有多久。
-- 当 5h 窗口**距重置不到 30 分钟**时，时间变**黄色**——提醒你趁回血前把额度用掉。
-
-**「它在等你」提醒** 🔴
-- 当 Claude 或 Codex 停下来**等你输入或确认权限**时，logo（和菜单栏）上会出现红色 `!` 角标。
-  你就知道该去回应了，而不是让它一直挂着。
-- **双层检测**：零配置的日志启发式（开箱即用，正在跑的会话也认）+ 可选钩子（即时精确）。
-- 你一回复、或点一下面板，角标立即消失。
-
-**点击直达**
-- 点面板**把对应桌面应用调到前台**（Claude.app / Codex.app）。没装？那就打开用量网页。
-
-**对限流诚实**
-- Anthropic 的用量接口有限流。返回 429 时，QuotaStrip 显示上次的数值并加一个**黄色小点**，
-  并严格按服务器的 `Retry-After` 等待后再试。重置时间已过的窗口按 0% 显示，绝不用旧的高百分比误导你。
-- **连接日志**（菜单 →「查看连接日志」）记录每次真实请求：`ok`、`429` 或网络错误。缓存命中不记。
-
-**不碍事**
-- 右侧保留系统 **Control Strip**，左侧保留 **esc** 键。
-- 息屏唤醒后自动恢复。
-- 菜单栏仪表图标，菜单含：立即刷新（强制）、重新显示 Touch Bar、打开用量页、查看连接日志、开机自启、退出。
-
----
+应用通过私有 `DFRFoundation` API 控制 Touch Bar，原理与 MTMR、Pock 相同。它不是 Mac App Store
+应用，也没有经过 Apple 公证。
 
 ## 安装
 
-### 方式 A — 下载即用（推荐）
+1. 从 [Releases](https://github.com/JasonBeam/quotastrip-magpie/releases) 下载
+   `QuotaStrip.zip` 和 `SHA256SUMS.txt`。
+2. 校验压缩包：
 
-1. 从 [Releases](../../releases) 页面下载 `QuotaStrip.zip` 并解压。
-2. 把 **QuotaStrip.app** 拖进**应用程序**文件夹。
-3. **首次打开**：右键点 app →**打开**（只需一次，因为 app 未经过 Apple 公证——
-   详见下方[为什么会有安全提示](#为什么会有-gatekeeper-安全提示)）。
-4. 按提示在**系统设置 → 隐私与安全性 → 辅助功能**里勾选 QuotaStrip
-   （仅 **esc** 键需要，额度显示不需要权限）。
-5. *（可选）* 运行 `./install-hooks.sh` 开启 Codex 的「等你」提醒。
+   ```bash
+   shasum -a 256 QuotaStrip.zip
+   ```
 
-搞定——面板就出现在你的 Touch Bar 上了。
+3. 解压后把 `QuotaStrip.app` 拖入 `/Applications`。
+4. 退出旧版 QuotaStrip，首次启动时按住 Control 点击应用并选择“打开”，以接受未公证签名。
+5. 如果 Touch Bar 正被其他应用占用，点击菜单栏 QuotaStrip 图标，选择“重新显示 Touch Bar”。
 
-### 方式 B — 从源码构建
+不需要辅助功能权限，不安装 Claude hooks，不修改 Codex 配置，也不会安装 LaunchAgent。
+你可以在 QuotaStrip 菜单里按需将它设为登录项。
 
-需要 Xcode 命令行工具（`xcode-select --install`）。
+## 从源码构建
 
 ```bash
-git clone https://github.com/hohocf/QuotaStrip.git
-cd QuotaStrip
-./build.sh --run
+git clone https://github.com/JasonBeam/quotastrip-magpie.git
+cd quotastrip-magpie
+./build.sh
 ```
 
-`build.sh` 会编译**通用二进制**（Intel + Apple Silicon）、打包资源并 ad-hoc 签名。
+构建需要 Xcode 和命令行工具。完成后会在 `/tmp/QuotaStrip.app` 生成 Intel + Apple Silicon
+通用应用。
 
----
+## 数据来源
 
-## 工作原理
+- **Codex 额度：** 优先读取 Magpie 本机只读接口；失败后回退 Codex app-server 的
+  `account/rateLimits/read` 和 `~/.codex/sessions`。只使用 `codex` 额度桶。
+- **Magpie 用量：** 读取 Magpie 本机接口及只读缓存/历史文件。
+- **DeepSeek：** 仅在用户主动把 API Key 保存到 macOS 钥匙串后，查询官方余额接口。
 
-QuotaStrip 通过与 [MTMR](https://github.com/Toxblh/MTMR)、[Pock](https://github.com/pigigaldi/Pock)
-相同的私有 `DFRFoundation` API 常驻 Touch Bar。数据由一个打包在 app 内的小 Python 脚本
-（`quota.py`）提供：
+界面每 20 秒刷新一次，请求串行执行并使用缓存，避免重叠刷新。缺少可靠数据时会显示“暂无数据”，
+不会把未知值伪造成 100%。
 
-- **Claude**——用你**已有的 Claude Code 登录**（macOS 钥匙串里的 OAuth token）调 Anthropic 官方的
-  **只读**用量接口。缓存约 10 分钟，绝不高频轮询。
-- **Codex**——**100% 本地**解析 `~/.codex/sessions` 日志，**零网络请求**。
+## 使用行为
 
-app 每 20 秒刷新一次。Codex 和等待提醒是实时的；Claude 的数值来自约 10 分钟的缓存
-（随时可通过菜单「立即刷新」强制拉取实时值）。
+- Codex/ChatGPT 启动时显示 Touch Bar；完全退出时隐藏。
+- Mac 唤醒后会重新检查 Codex/ChatGPT 是否运行。
+- Touch Bar 隐藏时，菜单栏控制入口和 QuotaStrip 进程仍会保留。
+- Codex 百分比代表剩余额度，不是已用额度。
+- 剩余额度大于 50% 显示绿色，21%–50% 显示黄色，20% 及以下显示红色。
 
----
+## 已知限制
 
-## 兼容性
+- Touch Bar 使用私有 API，未来 macOS 更新可能改变行为。
+- 发布包已签名但未经过 Apple 公证，首次启动需要手动确认。
+- Magpie 专属卡片依赖 Magpie 本机服务可用。
+- 数值取决于 Codex、Magpie 和各供应商接口；供应商修改接口后，对应行可能暂时显示暂无数据。
+- 本版本已在维护者的 Touch Bar Mac 上实机验证，但下载者仍应确认自己的物理 Touch Bar 布局和账号数据。
 
-- 任意**带 Touch Bar 的 MacBook Pro**——Intel（2016–2020）和 Apple Silicon 13"（M1 2020 / M2 2022）。
-  发布的是通用二进制，两种芯片都原生运行。
-- app 本体需 macOS 11+。**开机自启**需 macOS 13+（其余功能在更低版本也能用）。
+## 隐私
 
----
+QuotaStrip 只读取本机 Codex 会话数据和 Magpie 本机接口。它不会修改 `~/.codex/config.toml`，
+不会注入记忆，不会安装 hooks，也不会上传对话内容。可选的供应商 Key 只保存在 macOS 钥匙串，
+不会进入仓库或发布压缩包。
 
-## 隐私与「会不会被封号？」
+## 来源与许可证
 
-简短回答：**风险很低。** QuotaStrip 刻意做得很「礼貌」：
-
-- **只读。** 只*查询*你的用量——和 Claude Code 自己显示 `/usage` 用的是同一个接口。
-  从不发推理请求、不伪装客户端、不绕过任何东西。
-- **本地优先。** Codex 数据从不离开本机，你的 Claude token 也从不离开本机。
-- **尊重限流。** 收到 429 就完全按服务器要求（`Retry-After`）退避。
-
-它和社区里其它用量小工具属于同一类。现实风险是 Anthropic 这个*非公开*用量接口哪天可能变
-（最坏情况只是面板显示「no data」直到更新），而不是账号层面的问题。想更保守的话，
-把 `quota.py` 里的 `CLAUDE_CACHE_TTL` 调大即可。
-
----
-
-## 为什么会有 Gatekeeper 安全提示？
-
-这是个免费开源项目，没有付费的 Apple 开发者账号（$99/年），所以 app 是 **ad-hoc 签名**、未公证，
-macOS 首次打开会提示。二选一：
-
-- **右键 →「打开」** 一次（之后就信任了），或
-- 移除隔离属性：
-  ```bash
-  xattr -dr com.apple.quarantine /Applications/QuotaStrip.app
-  ```
-
-这是独立开源 Mac 工具（MTMR、Pock 等）的通用做法。源码都在这儿——你可以自己读、自己编译。
-
----
-
-## 许可证
-
-[MIT](LICENSE) © hohocf
-
-Claude 和 Codex 的 logo 分别归 Anthropic 和 OpenAI 所有，此处仅用于标识各自的服务。
+本项目基于 [hohocf/QuotaStrip](https://github.com/hohocf/QuotaStrip)，沿用 MIT License。
+产品名称和图标归各自权利人所有，仅用于标识数据来源。

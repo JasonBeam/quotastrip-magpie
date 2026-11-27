@@ -2,7 +2,7 @@
 
 当前版本在 Touch Bar 并排显示两种不同类型的额度：
 
-- **Codex**：保留现有的 5 小时、7 天剩余额度百分比及重置时间。优先读取 Codex app-server，失败时尝试本地会话日志。
+- **Codex**：保留现有的 5 小时、7 天剩余额度百分比及重置时间。优先读取 Magpie 本机额度视图，失败后回退 Codex app-server 和本地会话日志。
 - **DeepSeek**：使用官方 `GET https://api.deepseek.com/user/balance` 查询 **API 账户余额**（CNY / USD）。不是网页聊天额度，也不是 5h / 7d 百分比。模型、Search 和 Fetch 的消费会反映在账户余额里，不会调用收费搜索来估算额度。
 
 官方接口说明：https://api-docs.deepseek.com/zh-cn/api/get-user-balance
@@ -31,4 +31,4 @@ API Key 仅保存到 macOS 钥匙串（服务 `app.quotastrip.deepseek`，账户
 `./build.sh` 输出 `/tmp/QuotaStrip.app`（Intel + Apple Silicon 通用构建，ad-hoc 签名）。
 如果应用程序文件夹已有旧版，先退出旧版、备份，再用新构建替换。仅运行临时构建不会自动更新应用程序文件夹中的旧版。重建签名后，macOS 可能重新请求钥匙串访问许可。
 
-现有主 README 的 Claude 说明和旧截图来自上游旧版本，不代表当前 Codex + DeepSeek 实现。
+完整安装、数据来源和已知限制以主 README 为准。
